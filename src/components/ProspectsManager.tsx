@@ -7,6 +7,7 @@ import {
   HousingProject,
   AppUser,
 } from '../types';
+import { compressImageFile, compressImageDataUrl } from '../utils/imageCompress';
 import {
   UserPlus,
   Search,
@@ -160,7 +161,7 @@ export const ProspectsManager: React.FC<ProspectsManagerProps> = ({
     setCameraError(null);
   };
 
-  const handleCaptureLivePhoto = () => {
+  const handleCaptureLivePhoto = async () => {
     if (videoRef.current) {
       const video = videoRef.current;
       const canvas = document.createElement('canvas');
@@ -169,25 +170,21 @@ export const ProspectsManager: React.FC<ProspectsManagerProps> = ({
       const ctx = canvas.getContext('2d');
       if (ctx) {
         ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-        const dataUrl = canvas.toDataURL('image/jpeg', 0.85);
-        setPhotoUrl(dataUrl);
+        const rawDataUrl = canvas.toDataURL('image/jpeg', 0.72);
+        const compressed = await compressImageDataUrl(rawDataUrl);
+        setPhotoUrl(compressed);
         setPhotoSourceType('camera');
         handleStopLiveCamera();
       }
     }
   };
 
-  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (file) {
-      const reader = new FileReader();
-      reader.onload = (event) => {
-        if (event.target?.result) {
-          setPhotoUrl(event.target.result as string);
-          setPhotoSourceType('upload');
-        }
-      };
-      reader.readAsDataURL(file);
+      const compressed = await compressImageFile(file);
+      setPhotoUrl(compressed);
+      setPhotoSourceType('upload');
     }
   };
 

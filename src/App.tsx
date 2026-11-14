@@ -55,7 +55,17 @@ import { MobileBottomNav } from './components/MobileBottomNav';
 import { MobileFrame } from './components/MobileFrame';
 import { idbGet, idbSet, migrateLocalStorageToIndexedDB } from './utils/indexedDB';
 import { broadcastDataUpdate, getSyncChannel, BroadcastMessage } from './utils/broadcastChannel';
-import { saveToCloud, loadFromCloud, subscribeToCloudKey, CLIENT_TAB_ID, CloudSyncMeta } from './utils/firebase';
+import {
+  saveToCloud,
+  loadFromCloud,
+  loadFromCloudWithStatus,
+  subscribeToCloudKey,
+  subscribeCloudStatus,
+  getCloudStatus,
+  CloudStatusInfo,
+  CLIENT_TAB_ID,
+  CloudSyncMeta,
+} from './utils/firebase';
 import { fetchUsersFromSupabase, saveUsersToSupabase, isSupabaseConnected, saveSupabaseConfig } from './utils/supabase';
 import { formatRupiah } from './utils/formatters';
 import { Building2, RefreshCw, Radio, X } from 'lucide-react';
@@ -159,10 +169,16 @@ export default function App() {
   const [syncGeneration, setSyncGeneration] = useState<number>(0);
   const [showDatabaseSyncModal, setShowDatabaseSyncModal] = useState<boolean>(false);
   const [syncNotice, setSyncNotice] = useState<{ id: string; message: string } | null>(null);
+  const [cloudStatus, setCloudStatus] = useState<CloudStatusInfo>(() => getCloudStatus());
 
   // Refs to prevent echo loops between Cloud/Broadcast updates and local persistence effects
   const lastRemoteJsonRef = useRef<Record<string, string>>({});
   const skipCloudWriteJsonRef = useRef<Record<string, string>>({});
+  const lastResumePullRef = useRef<number>(0);
+
+  useEffect(() => {
+    return subscribeCloudStatus(setCloudStatus);
+  }, []);
 
   const DATA_SYNC_LABELS: Record<string, string> = {
     yp_erp_users: 'Data User & Akses ERP diperbarui',
@@ -267,36 +283,49 @@ export default function App() {
         }
       }
 
-      // Load from Supabase "users" table & Cloud Firestore
+      // Load from Supabase "users" table & Cloud Firestore (with explicit status to prevent offline overwrite)
       const supabaseUsers = await fetchUsersFromSupabase();
 
       const [
-        cloudUsers,
-        cloudProjects,
-        cloudUnits,
-        cloudSales,
-        cloudConstruction,
-        cloudFinances,
-        cloudCustomers,
-        cloudMaterials,
-        cloudUsages,
-        cloudDocs,
-        cloudAttendance,
-        cloudProspects,
+        cloudUsersRes,
+        cloudProjectsRes,
+        cloudUnitsRes,
+        cloudSalesRes,
+        cloudConstructionRes,
+        cloudFinancesRes,
+        cloudCustomersRes,
+        cloudMaterialsRes,
+        cloudUsagesRes,
+        cloudDocsRes,
+        cloudAttendanceRes,
+        cloudProspectsRes,
       ] = await Promise.all([
-        loadFromCloud<AppUser[]>('yp_erp_users'),
-        loadFromCloud<HousingProject[]>('yp_erp_projects'),
-        loadFromCloud<Unit[]>('yp_erp_units'),
-        loadFromCloud<SalesTransaction[]>('yp_erp_sales'),
-        loadFromCloud<ConstructionMilestone[]>('yp_erp_construction'),
-        loadFromCloud<FinancialRecord[]>('yp_erp_finances'),
-        loadFromCloud<CustomerProfile[]>('yp_erp_customers'),
-        loadFromCloud<MaterialItem[]>('yp_erp_materials'),
-        loadFromCloud<MaterialUsageRecord[]>('yp_erp_material_usages'),
-        loadFromCloud<ProgressDocumentation[]>('yp_erp_progress_docs'),
-        loadFromCloud<AttendanceRecord[]>('yp_erp_attendance'),
-        loadFromCloud<ProspectRecord[]>('yp_erp_prospects'),
+        loadFromCloudWithStatus<AppUser[]>('yp_erp_users'),
+        loadFromCloudWithStatus<HousingProject[]>('yp_erp_projects'),
+        loadFromCloudWithStatus<Unit[]>('yp_erp_units'),
+        loadFromCloudWithStatus<SalesTransaction[]>('yp_erp_sales'),
+        loadFromCloudWithStatus<ConstructionMilestone[]>('yp_erp_construction'),
+        loadFromCloudWithStatus<FinancialRecord[]>('yp_erp_finances'),
+        loadFromCloudWithStatus<CustomerProfile[]>('yp_erp_customers'),
+        loadFromCloudWithStatus<MaterialItem[]>('yp_erp_materials'),
+        loadFromCloudWithStatus<MaterialUsageRecord[]>('yp_erp_material_usages'),
+        loadFromCloudWithStatus<ProgressDocumentation[]>('yp_erp_progress_docs'),
+        loadFromCloudWithStatus<AttendanceRecord[]>('yp_erp_attendance'),
+        loadFromCloudWithStatus<ProspectRecord[]>('yp_erp_prospects'),
       ]);
+
+      const cloudUsers = cloudUsersRes.data;
+      const cloudProjects = cloudProjectsRes.data;
+      const cloudUnits = cloudUnitsRes.data;
+      const cloudSales = cloudSalesRes.data;
+      const cloudConstruction = cloudConstructionRes.data;
+      const cloudFinances = cloudFinancesRes.data;
+      const cloudCustomers = cloudCustomersRes.data;
+      const cloudMaterials = cloudMaterialsRes.data;
+      const cloudUsages = cloudUsagesRes.data;
+      const cloudDocs = cloudDocsRes.data;
+      const cloudAttendance = cloudAttendanceRes.data;
+      const cloudProspects = cloudProspectsRes.data;
 
       // IndexedDB fallbacks
       const [
@@ -342,16 +371,33 @@ export default function App() {
       const finalAttendance = pickCloudFirst(cloudAttendance, idbAttendance);
       const finalProspects = pickCloudFirst(cloudProspects, idbProspects);
 
-      const markLoadedFromCloud = (key: string, val: unknown, hasCloud: boolean) => {
-        if (hasCloud && val !== null && val !== undefined) {
+      // Guard against overwriting Cloud with initial/stale state on error or already-loaded data
+      const markSkipWrite = (key: string, val: unknown) => {
+        if (val !== null && val !== undefined) {
           const json = JSON.stringify(val);
           lastRemoteJsonRef.current[key] = json;
           skipCloudWriteJsonRef.current[key] = json;
         }
       };
 
+      const applyLoadedDataset = <T,>(
+        key: string,
+        _cloudRes: { data: T | null; existsInCloud: boolean; error?: string },
+        finalVal: T | null,
+        initialFallback: T,
+        setter: React.Dispatch<React.SetStateAction<T>>
+      ) => {
+        if (finalVal !== null) {
+          markSkipWrite(key, finalVal);
+          setter(finalVal);
+        } else {
+          markSkipWrite(key, initialFallback);
+          setter(initialFallback);
+        }
+      };
+
       if (finalUsers) {
-        markLoadedFromCloud('yp_erp_users', finalUsers, Boolean(cloudUsers && cloudUsers.length >= finalUsers.length));
+        markSkipWrite('yp_erp_users', finalUsers);
         setUsers(finalUsers);
         if (idbCurrentUser) {
           const freshUser = finalUsers.find(
@@ -371,64 +417,17 @@ export default function App() {
         setCurrentUser(idbCurrentUser);
       }
 
-      if (finalProjects) {
-        markLoadedFromCloud('yp_erp_projects', finalProjects, cloudProjects !== null);
-        setProjects(finalProjects);
-      }
-      if (finalUnits) {
-        markLoadedFromCloud('yp_erp_units', finalUnits, cloudUnits !== null);
-        setUnits(finalUnits);
-      }
-      if (finalSales) {
-        markLoadedFromCloud('yp_erp_sales', finalSales, cloudSales !== null);
-        setSales(finalSales);
-      }
-      if (finalConstruction) {
-        markLoadedFromCloud('yp_erp_construction', finalConstruction, cloudConstruction !== null);
-        setConstruction(finalConstruction);
-      }
-      if (finalFinances) {
-        markLoadedFromCloud('yp_erp_finances', finalFinances, cloudFinances !== null);
-        setFinances(finalFinances);
-      }
-      if (finalCustomers) {
-        markLoadedFromCloud('yp_erp_customers', finalCustomers, cloudCustomers !== null);
-        setCustomers(finalCustomers);
-      }
-      if (finalMaterials) {
-        markLoadedFromCloud('yp_erp_materials', finalMaterials, cloudMaterials !== null);
-        setMaterials(finalMaterials);
-      }
-      if (finalUsages) {
-        markLoadedFromCloud('yp_erp_material_usages', finalUsages, cloudUsages !== null);
-        setMaterialUsages(finalUsages);
-      }
-      if (finalDocs) {
-        markLoadedFromCloud('yp_erp_progress_docs', finalDocs, cloudDocs !== null);
-        setProgressDocs(finalDocs);
-      }
-      if (finalAttendance) {
-        markLoadedFromCloud('yp_erp_attendance', finalAttendance, cloudAttendance !== null);
-        setAttendanceRecords(finalAttendance);
-      }
-      if (finalProspects) {
-        markLoadedFromCloud('yp_erp_prospects', finalProspects, cloudProspects !== null);
-        setProspects(finalProspects);
-      }
-
-      // Seed cloud database if first initialization
-      if (!cloudProspects && finalProspects) saveToCloud('yp_erp_prospects', finalProspects);
-      if (!cloudSales && finalSales) saveToCloud('yp_erp_sales', finalSales);
-      if (!cloudUnits && finalUnits) saveToCloud('yp_erp_units', finalUnits);
-      if (!cloudProjects && finalProjects) saveToCloud('yp_erp_projects', finalProjects);
-      if (!cloudCustomers && finalCustomers) saveToCloud('yp_erp_customers', finalCustomers);
-      if (!cloudFinances && finalFinances) saveToCloud('yp_erp_finances', finalFinances);
-      if (!cloudConstruction && finalConstruction) saveToCloud('yp_erp_construction', finalConstruction);
-      if (!cloudMaterials && finalMaterials) saveToCloud('yp_erp_materials', finalMaterials);
-      if (!cloudUsages && finalUsages) saveToCloud('yp_erp_material_usages', finalUsages);
-      if (!cloudDocs && finalDocs) saveToCloud('yp_erp_progress_docs', finalDocs);
-      if (!cloudAttendance && finalAttendance) saveToCloud('yp_erp_attendance', finalAttendance);
-      if (!cloudUsers && finalUsers) saveToCloud('yp_erp_users', finalUsers);
+      applyLoadedDataset('yp_erp_projects', cloudProjectsRes, finalProjects, INITIAL_PROJECTS, setProjects);
+      applyLoadedDataset('yp_erp_units', cloudUnitsRes, finalUnits, INITIAL_UNITS, setUnits);
+      applyLoadedDataset('yp_erp_sales', cloudSalesRes, finalSales, INITIAL_SALES, setSales);
+      applyLoadedDataset('yp_erp_construction', cloudConstructionRes, finalConstruction, INITIAL_CONSTRUCTION, setConstruction);
+      applyLoadedDataset('yp_erp_finances', cloudFinancesRes, finalFinances, INITIAL_FINANCE, setFinances);
+      applyLoadedDataset('yp_erp_customers', cloudCustomersRes, finalCustomers, INITIAL_CUSTOMERS, setCustomers);
+      applyLoadedDataset('yp_erp_materials', cloudMaterialsRes, finalMaterials, INITIAL_MATERIALS, setMaterials);
+      applyLoadedDataset('yp_erp_material_usages', cloudUsagesRes, finalUsages, INITIAL_MATERIAL_USAGES, setMaterialUsages);
+      applyLoadedDataset('yp_erp_progress_docs', cloudDocsRes, finalDocs, INITIAL_PROGRESS_DOCS, setProgressDocs);
+      applyLoadedDataset('yp_erp_attendance', cloudAttendanceRes, finalAttendance, INITIAL_ATTENDANCE, setAttendanceRecords);
+      applyLoadedDataset('yp_erp_prospects', cloudProspectsRes, finalProspects, INITIAL_PROSPECTS, setProspects);
 
     } catch (e) {
       console.error('Error loading data from Cloud/IndexedDB:', e);
@@ -438,9 +437,74 @@ export default function App() {
     }
   };
 
+  // Throttled server pull when another device wakes from sleep, regains tab focus, or reconnects online
+  const syncLatestFromCloud = async (force = false) => {
+    const now = Date.now();
+    if (!force && now - lastResumePullRef.current < 4000) return;
+    lastResumePullRef.current = now;
+
+    try {
+      const pulls: Array<{
+        key: string;
+        setter: React.Dispatch<React.SetStateAction<any>>;
+        requireNonEmpty?: boolean;
+      }> = [
+        { key: 'yp_erp_users', setter: setUsers, requireNonEmpty: true },
+        { key: 'yp_erp_projects', setter: setProjects },
+        { key: 'yp_erp_units', setter: setUnits },
+        { key: 'yp_erp_sales', setter: setSales },
+        { key: 'yp_erp_construction', setter: setConstruction },
+        { key: 'yp_erp_finances', setter: setFinances },
+        { key: 'yp_erp_customers', setter: setCustomers },
+        { key: 'yp_erp_materials', setter: setMaterials },
+        { key: 'yp_erp_material_usages', setter: setMaterialUsages },
+        { key: 'yp_erp_progress_docs', setter: setProgressDocs },
+        { key: 'yp_erp_attendance', setter: setAttendanceRecords },
+        { key: 'yp_erp_prospects', setter: setProspects },
+      ];
+
+      const results = await Promise.all(pulls.map((p) => loadFromCloudWithStatus<any[]>(p.key)));
+      results.forEach((res, idx) => {
+        const target = pulls[idx];
+        if (res.existsInCloud && Array.isArray(res.data)) {
+          if (target.requireNonEmpty && res.data.length === 0) return;
+          applyRemoteState(target.key, res.data, target.setter);
+        }
+      });
+    } catch (err) {
+      console.warn('Background resume pull notice:', err);
+    }
+  };
+
   useEffect(() => {
     reloadAllFromDatabase();
   }, []);
+
+  useEffect(() => {
+    if (!isDbLoaded) return;
+
+    const onVisibility = () => {
+      if (document.visibilityState === 'visible') {
+        syncLatestFromCloud(false);
+      }
+    };
+    const onOnline = () => {
+      syncLatestFromCloud(true);
+    };
+    const onFocus = () => {
+      syncLatestFromCloud(false);
+    };
+
+    document.addEventListener('visibilitychange', onVisibility);
+    window.addEventListener('online', onOnline);
+    window.addEventListener('focus', onFocus);
+
+    return () => {
+      document.removeEventListener('visibilitychange', onVisibility);
+      window.removeEventListener('online', onOnline);
+      window.removeEventListener('focus', onFocus);
+    };
+  }, [isDbLoaded]);
 
   // Subscribe to Realtime Cloud Firestore Changes across all devices
   useEffect(() => {
@@ -613,11 +677,12 @@ export default function App() {
       console.warn(`localStorage write failed for ${key}:`, e);
     }
 
-    if (skipCloudWriteJsonRef.current[key] === json) {
-      delete skipCloudWriteJsonRef.current[key];
+    if (skipCloudWriteJsonRef.current[key] === json || lastRemoteJsonRef.current[key] === json) {
+      lastRemoteJsonRef.current[key] = json;
       return;
     }
 
+    delete skipCloudWriteJsonRef.current[key];
     lastRemoteJsonRef.current[key] = json;
     if (alsoSaveSupabaseUsers && Array.isArray(data)) {
       saveUsersToSupabase(data);
@@ -1345,6 +1410,7 @@ export default function App() {
           onOpenNewUnit={() => setShowNewUnitModal(true)}
           onOpenKprCalc={() => setActiveTab('kpr_calc')}
           onOpenDatabaseSync={() => setShowDatabaseSyncModal(true)}
+          cloudStatus={cloudStatus}
           isMobileFrameActive={isMobileFrameActive}
           onToggleMobileFrame={toggleMobileFrame}
         />
@@ -1565,6 +1631,7 @@ export default function App() {
             currentUser={currentUser}
             onClose={() => setShowDatabaseSyncModal(false)}
             onDataReload={reloadAllFromDatabase}
+            onManualSyncNow={() => syncLatestFromCloud(true)}
           />
         )}
 

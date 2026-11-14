@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { AppUser } from '../types';
 import { Building2, Plus, Calculator, Search, Home, LogOut, Database, Smartphone, Download } from 'lucide-react';
+import type { CloudStatusInfo } from '../utils/firebase';
 
 interface NavbarProps {
   currentUser: AppUser | null;
@@ -14,6 +15,7 @@ interface NavbarProps {
   onOpenNewUnit?: () => void;
   onOpenKprCalc: () => void;
   onOpenDatabaseSync?: () => void;
+  cloudStatus?: CloudStatusInfo;
   isMobileFrameActive?: boolean;
   onToggleMobileFrame?: () => void;
 }
@@ -30,6 +32,7 @@ export const Navbar: React.FC<NavbarProps> = ({
   onOpenNewUnit,
   onOpenKprCalc,
   onOpenDatabaseSync,
+  cloudStatus,
   isMobileFrameActive,
   onToggleMobileFrame,
 }) => {
@@ -155,11 +158,37 @@ export const Navbar: React.FC<NavbarProps> = ({
 
             <button
               onClick={onOpenDatabaseSync}
-              className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-bold bg-emerald-950/80 text-emerald-300 hover:bg-emerald-900 border border-emerald-700/60 transition-all shadow-sm"
-              title="Database IndexedDB & Auto-Sync Lintas User"
+              className={`inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-bold border transition-all shadow-sm ${
+                cloudStatus?.status === 'permission-denied' || cloudStatus?.status === 'error'
+                  ? 'bg-rose-950/90 text-rose-200 hover:bg-rose-900 border-rose-600/70'
+                  : cloudStatus?.status === 'quota-exceeded' || cloudStatus?.status === 'offline'
+                  ? 'bg-amber-950/90 text-amber-200 hover:bg-amber-900 border-amber-600/70'
+                  : 'bg-emerald-950/80 text-emerald-300 hover:bg-emerald-900 border-emerald-700/60'
+              }`}
+              title={
+                cloudStatus?.lastError ||
+                'Status Sinkronisasi Cloud Lintas Perangkat & Database'
+              }
             >
-              <Database className="w-3.5 h-3.5 text-emerald-400" />
-              <span className="hidden sm:inline">Database & Sync</span>
+              <span
+                className={`w-2 h-2 rounded-full ${
+                  cloudStatus?.status === 'permission-denied' || cloudStatus?.status === 'error'
+                    ? 'bg-rose-400 animate-ping'
+                    : cloudStatus?.status === 'quota-exceeded' || cloudStatus?.status === 'offline'
+                    ? 'bg-amber-400 animate-pulse'
+                    : 'bg-emerald-400 animate-pulse'
+                }`}
+              />
+              <Database className="w-3.5 h-3.5" />
+              <span className="hidden sm:inline">
+                {cloudStatus?.status === 'quota-exceeded'
+                  ? 'Sync Terbatas'
+                  : cloudStatus?.status === 'permission-denied' || cloudStatus?.status === 'error'
+                  ? 'Sync Bermasalah'
+                  : cloudStatus?.status === 'offline'
+                  ? 'Offline'
+                  : 'Database & Sync'}
+              </span>
             </button>
 
             <button

@@ -5,6 +5,7 @@ import {
   getDoc,
   getDocFromServer,
   setDoc,
+  deleteDoc,
   onSnapshot,
 } from 'firebase/firestore';
 import firebaseConfig from '../../firebase-applet-config.json';
@@ -12,9 +13,10 @@ import { saveToSupabase, loadFromSupabase, subscribeToSupabaseKey, isSupabaseCon
 
 const app = !getApps().length ? initializeApp(firebaseConfig) : getApp();
 
-const dbId = firebaseConfig.firestoreDatabaseId && firebaseConfig.firestoreDatabaseId !== ''
-  ? firebaseConfig.firestoreDatabaseId
-  : '(default)';
+const dbId =
+  firebaseConfig.firestoreDatabaseId && firebaseConfig.firestoreDatabaseId !== ''
+    ? firebaseConfig.firestoreDatabaseId
+    : '(default)';
 
 export const db = getFirestore(app, dbId);
 
@@ -24,24 +26,39 @@ export const CLIENT_TAB_ID =
     ? crypto.randomUUID()
     : `tab-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
 
-// Validate initial Firestore connection on boot
-async function testFirestoreConnection() {
-  try {
-    await getDocFromServer(doc(db, 'test', 'connection'));
-  } catch (error) {
-    if (error instanceof Error && error.message.includes('the client is offline')) {
-      console.error('Please check your Firebase configuration.');
-    }
-  }
+export enum OperationType {
+  CREATE = 'create',
+  UPDATE = 'update',
+  DELETE = 'delete',
+  LIST = 'list',
+  GET = 'get',
+  WRITE = 'write',
 }
-testFirestoreConnection();
 
-// Flag to track if Firebase Firestore hit quota limits
-let isFirebaseQuotaExceeded = false;
-let quotaWarningLogged = false;
+interface FirestoreErrorInfo {
+  error: string;
+  operationType: OperationType;
+  path: string | null;
+  authInfo: {
+    userId: string | null;
+    email: string | null;
+  };
+}
 
-export function checkIsFirebaseQuotaExceeded(): boolean {
-  return isFirebaseQuotaExceeded;
+export type CloudStatusType =
+  | 'connecting'
+  | 'connected'
+  | 'permission-denied'
+  | 'quota-exceeded'
+  | 'offline'
+  | 'error';
+
+export interface CloudStatusInfo {
+  status: CloudStatusType;
+  lastError?: string;
+  lastSyncAt?: string;
+  writeQuotaExceeded: boolean;
+  readQuotaExceeded: boolean;
 }
 
 export interface CloudSyncMeta {
@@ -54,24 +71,134 @@ export interface CloudSyncMeta {
   fromCache?: boolean;
 }
 
-// Debounce map for cloud writes to prevent spamming cloud quotas
-const writeDebounceTimers: Record<string, ReturnType<typeof setTimeout>> = {};
-
-function handleFirestoreError(err: any, context: string) {
-  const errMsg = err?.message || String(err);
-  const code = err?.code;
-  if (code === 'resource-exhausted' || errMsg.includes('Quota limit exceeded') || errMsg.includes('resource-exhausted')) {
-    isFirebaseQuotaExceeded = true;
-    if (!quotaWarningLogged) {
-      console.warn(`[Firebase Firestore] Quota limit reached in ${context}. Automatically switching to Supabase & IndexedDB storage mode.`);
-      quotaWarningLogged = true;
-    }
-    return true;
-  }
-  return false;
+export interface CloudLoadResult<T> {
+  data: T | null;
+  existsInCloud: boolean;
+  error?: string;
 }
 
-// Helper function to recursively sanitize data (convert undefined properties or remove them)
+const MAX_SINGLE_DOC_CHARS = 700_000;
+const CHUNK_CHAR_SIZE = 550_000;
+
+let isFirebaseWriteQuotaExceeded = false;
+let isFirebaseReadQuotaExceeded = false;
+let cloudStatusState: CloudStatusInfo = {
+  status: 'connecting',
+  writeQuotaExceeded: false,
+  readQuotaExceeded: false,
+};
+
+const statusListeners = new Set<(info: CloudStatusInfo) => void>();
+const writeDebounceTimers: Record<string, ReturnType<typeof setTimeout>> = {};
+let globalWriteQueue: Promise<void> = Promise.resolve();
+
+function updateCloudStatus(patch: Partial<CloudStatusInfo>) {
+  cloudStatusState = {
+    ...cloudStatusState,
+    ...patch,
+    writeQuotaExceeded: isFirebaseWriteQuotaExceeded,
+    readQuotaExceeded: isFirebaseReadQuotaExceeded,
+  };
+  statusListeners.forEach((cb) => {
+    try {
+      cb(cloudStatusState);
+    } catch {
+      // ignore listener error
+    }
+  });
+}
+
+export function getCloudStatus(): CloudStatusInfo {
+  return cloudStatusState;
+}
+
+export function subscribeCloudStatus(listener: (info: CloudStatusInfo) => void): () => void {
+  statusListeners.add(listener);
+  listener(cloudStatusState);
+  return () => {
+    statusListeners.delete(listener);
+  };
+}
+
+export function checkIsFirebaseQuotaExceeded(): boolean {
+  return isFirebaseWriteQuotaExceeded || isFirebaseReadQuotaExceeded;
+}
+
+function classifyFirestoreError(
+  err: any,
+  operationType: OperationType,
+  path: string | null
+): CloudStatusType {
+  const errMsg = err?.message || String(err);
+  const code = err?.code || '';
+
+  if (
+    code === 'resource-exhausted' ||
+    errMsg.includes('Quota limit exceeded') ||
+    errMsg.includes('resource-exhausted') ||
+    errMsg.includes('429')
+  ) {
+    if (operationType === OperationType.WRITE || operationType === OperationType.CREATE || operationType === OperationType.UPDATE || operationType === OperationType.DELETE) {
+      isFirebaseWriteQuotaExceeded = true;
+    } else {
+      isFirebaseReadQuotaExceeded = true;
+    }
+    updateCloudStatus({
+      status: 'quota-exceeded',
+      lastError:
+        'Batas kuota harian gratis Cloud Firestore tercapai. Kuota akan reset besok, atau hubungkan Supabase di menu Database & Sync.',
+    });
+    return 'quota-exceeded';
+  }
+
+  if (code === 'permission-denied' || errMsg.includes('Missing or insufficient permissions')) {
+    const errInfo: FirestoreErrorInfo = {
+      error: errMsg,
+      operationType,
+      path,
+      authInfo: { userId: null, email: null },
+    };
+    console.error('Firestore Error:', JSON.stringify(errInfo));
+    updateCloudStatus({
+      status: 'permission-denied',
+      lastError: `Akses database Firestore ditolak (${path || 'root'}).`,
+    });
+    return 'permission-denied';
+  }
+
+  if (code === 'unavailable' || errMsg.includes('the client is offline') || errMsg.includes('Failed to fetch')) {
+    updateCloudStatus({
+      status: 'offline',
+      lastError: 'Koneksi internet / server Firestore sedang offline.',
+    });
+    return 'offline';
+  }
+
+  updateCloudStatus({
+    status: 'error',
+    lastError: errMsg,
+  });
+  return 'error';
+}
+
+// Validate initial Firestore connection on boot
+async function testFirestoreConnection() {
+  try {
+    await getDocFromServer(doc(db, 'test', 'connection'));
+    updateCloudStatus({
+      status: isFirebaseWriteQuotaExceeded ? 'quota-exceeded' : 'connected',
+      lastSyncAt: new Date().toISOString(),
+    });
+  } catch (error: any) {
+    const kind = classifyFirestoreError(error, OperationType.GET, 'test/connection');
+    if (kind === 'offline') {
+      console.error('Please check your Firebase configuration.');
+    }
+  }
+}
+testFirestoreConnection();
+
+// Helper function to recursively sanitize data (convert undefined properties)
 function sanitizeForFirestore(obj: any): any {
   if (obj === undefined) return null;
   if (obj === null || typeof obj !== 'object') return obj;
@@ -88,43 +215,124 @@ function sanitizeForFirestore(obj: any): any {
   return cleanObj;
 }
 
+async function readChunkedPayload<T>(key: string, chunkCount: number, useServer = true): Promise<T | null> {
+  const chunkPromises = Array.from({ length: chunkCount }, (_, idx) => {
+    const chunkRef = doc(db, 'erp_data', `${key}__chunk_${idx}`);
+    return useServer ? getDocFromServer(chunkRef) : getDoc(chunkRef);
+  });
+  const snaps = await Promise.all(chunkPromises);
+  let combined = '';
+  for (let i = 0; i < snaps.length; i++) {
+    const s = snaps[i];
+    if (!s.exists() || typeof s.data()?.chunkData !== 'string') {
+      throw new Error(`Missing chunk ${i} for ${key}`);
+    }
+    combined += s.data().chunkData;
+  }
+  return JSON.parse(combined) as T;
+}
+
+async function writePayloadToFirestore(
+  key: string,
+  cleanData: any,
+  metaFields: Record<string, string>
+): Promise<void> {
+  const serialized = JSON.stringify(cleanData);
+  const docRef = doc(db, 'erp_data', key);
+
+  if (serialized.length <= MAX_SINGLE_DOC_CHARS) {
+    await setDoc(docRef, {
+      payload: cleanData,
+      ...metaFields,
+    });
+    return;
+  }
+
+  // Split large payloads (e.g., multiple base64 photos) into chunks under Firestore's 1MB doc limit
+  const totalLength = serialized.length;
+  const chunkCount = Math.ceil(totalLength / CHUNK_CHAR_SIZE);
+  const chunkWrites: Promise<void>[] = [];
+
+  for (let i = 0; i < chunkCount; i++) {
+    const slice = serialized.slice(i * CHUNK_CHAR_SIZE, (i + 1) * CHUNK_CHAR_SIZE);
+    const chunkRef = doc(db, 'erp_data', `${key}__chunk_${i}`);
+    chunkWrites.push(
+      setDoc(chunkRef, {
+        chunkData: slice,
+        chunkIndex: i,
+        updatedAt: metaFields.updatedAt,
+      })
+    );
+  }
+  await Promise.all(chunkWrites);
+
+  await setDoc(docRef, {
+    isChunked: true,
+    chunkCount,
+    totalLength,
+    ...metaFields,
+  });
+
+  // Clean up one trailing stale chunk if payload shrank
+  try {
+    await deleteDoc(doc(db, 'erp_data', `${key}__chunk_${chunkCount}`));
+  } catch {
+    // ignore if doesn't exist
+  }
+}
+
 export async function saveToCloud<T>(
   key: string,
   data: T,
   immediate = false,
   meta?: { updatedBy?: string; lastAction?: string; actionDetail?: string }
 ): Promise<void> {
-  const executeSave = async () => {
-    const updatedAt = new Date().toISOString();
-    // 1. Try Save to Firebase Firestore if quota not exceeded
-    if (!isFirebaseQuotaExceeded) {
-      try {
-        const docRef = doc(db, 'erp_data', key);
-        const cleanData = sanitizeForFirestore(data);
-        await setDoc(docRef, {
-          payload: cleanData,
+  const executeSave = () => {
+    const nextTask = globalWriteQueue
+      .catch(() => undefined)
+      .then(async () => {
+        const updatedAt = new Date().toISOString();
+        const metaFields: Record<string, string> = {
           updatedAt,
           updatedByClientId: CLIENT_TAB_ID,
-          ...(meta?.updatedBy ? { updatedBy: meta.updatedBy } : {}),
-          ...(meta?.lastAction ? { lastAction: meta.lastAction } : {}),
-          ...(meta?.actionDetail ? { actionDetail: meta.actionDetail } : {}),
-        });
-      } catch (err: any) {
-        const isQuotaErr = handleFirestoreError(err, `saveToCloud(${key})`);
-        if (!isQuotaErr) {
-          console.warn(`Firebase Firestore save error for key ${key}:`, err?.message || err);
-        }
-      }
-    }
+        };
+        if (meta?.updatedBy) metaFields.updatedBy = String(meta.updatedBy).slice(0, 200);
+        if (meta?.lastAction) metaFields.lastAction = String(meta.lastAction).slice(0, 128);
+        if (meta?.actionDetail) metaFields.actionDetail = String(meta.actionDetail).slice(0, 500);
 
-    // 2. Save to Supabase
-    if (isSupabaseConnected()) {
-      try {
-        await saveToSupabase(key, data);
-      } catch (err) {
-        console.warn(`Supabase save notice for key ${key}:`, err);
-      }
-    }
+        // 1. Save to Firebase Firestore if write quota not exceeded
+        if (!isFirebaseWriteQuotaExceeded) {
+          try {
+            const cleanData = sanitizeForFirestore(data);
+            await writePayloadToFirestore(key, cleanData, metaFields);
+            updateCloudStatus({
+              status: 'connected',
+              lastError: undefined,
+              lastSyncAt: updatedAt,
+            });
+          } catch (err: any) {
+            classifyFirestoreError(err, OperationType.WRITE, `erp_data/${key}`);
+          }
+        }
+
+        // 2. Save to Supabase if connected
+        if (isSupabaseConnected()) {
+          try {
+            const ok = await saveToSupabase(key, data);
+            if (ok && isFirebaseWriteQuotaExceeded) {
+              updateCloudStatus({
+                status: 'connected',
+                lastSyncAt: updatedAt,
+              });
+            }
+          } catch (err) {
+            console.warn(`Supabase save notice for key ${key}:`, err);
+          }
+        }
+      });
+
+    globalWriteQueue = nextTask;
+    return nextTask;
   };
 
   if (immediate) {
@@ -135,12 +343,10 @@ export async function saveToCloud<T>(
     return executeSave();
   }
 
-  // Clear any pending debounce timer for this key
   if (writeDebounceTimers[key]) {
     clearTimeout(writeDebounceTimers[key]);
   }
 
-  // Debounce writes by 300ms
   return new Promise((resolve) => {
     writeDebounceTimers[key] = setTimeout(async () => {
       delete writeDebounceTimers[key];
@@ -150,43 +356,85 @@ export async function saveToCloud<T>(
   });
 }
 
-export async function loadFromCloud<T>(key: string): Promise<T | null> {
+export async function loadFromCloudWithStatus<T>(key: string): Promise<CloudLoadResult<T>> {
+  let firestoreError: string | undefined;
+
   // 1. Try Firebase Firestore directly from server first
-  if (!isFirebaseQuotaExceeded) {
+  if (!isFirebaseReadQuotaExceeded) {
     try {
       const docRef = doc(db, 'erp_data', key);
       const snap = await getDocFromServer(docRef);
-      if (snap.exists() && snap.data().payload !== undefined) {
-        return snap.data().payload as T;
+      if (snap.exists()) {
+        const docData = snap.data();
+        if (docData?.isChunked && typeof docData.chunkCount === 'number') {
+          const reassembled = await readChunkedPayload<T>(key, docData.chunkCount, true);
+          updateCloudStatus({
+            status: isFirebaseWriteQuotaExceeded ? 'quota-exceeded' : 'connected',
+            lastSyncAt: new Date().toISOString(),
+          });
+          return { data: reassembled, existsInCloud: true };
+        }
+        if (docData && docData.payload !== undefined) {
+          updateCloudStatus({
+            status: isFirebaseWriteQuotaExceeded ? 'quota-exceeded' : 'connected',
+            lastSyncAt: new Date().toISOString(),
+          });
+          return { data: docData.payload as T, existsInCloud: true };
+        }
       }
-    } catch (err: any) {
-      // Fallback to cached getDoc if getDocFromServer fails or offline
+      // Document genuinely does not exist on server
+      updateCloudStatus({
+        status: isFirebaseWriteQuotaExceeded ? 'quota-exceeded' : 'connected',
+      });
+    } catch (serverErr: any) {
+      // Fallback to cached getDoc if server unreachable
       try {
         const docRef = doc(db, 'erp_data', key);
         const snap = await getDoc(docRef);
-        if (snap.exists() && snap.data().payload !== undefined) {
-          return snap.data().payload as T;
+        if (snap.exists()) {
+          const docData = snap.data();
+          if (docData?.isChunked && typeof docData.chunkCount === 'number') {
+            const reassembled = await readChunkedPayload<T>(key, docData.chunkCount, false);
+            return { data: reassembled, existsInCloud: true };
+          }
+          if (docData && docData.payload !== undefined) {
+            return { data: docData.payload as T, existsInCloud: true };
+          }
         }
-      } catch (e: any) {
-        const isQuotaErr = handleFirestoreError(e, `loadFromCloud(${key})`);
-        if (!isQuotaErr) {
-          console.warn(`Firebase Firestore load notice for key ${key}:`, e?.message || e);
-        }
+        // Check if original error was permission/offline/quota
+        const kind = classifyFirestoreError(serverErr, OperationType.GET, `erp_data/${key}`);
+        firestoreError = serverErr?.message || kind;
+      } catch (cacheErr: any) {
+        const kind = classifyFirestoreError(cacheErr, OperationType.GET, `erp_data/${key}`);
+        firestoreError = cacheErr?.message || kind;
       }
     }
+  } else {
+    firestoreError = 'read-quota-exceeded';
   }
 
   // 2. Try Supabase as backup/dual load
   if (isSupabaseConnected()) {
     try {
       const supabaseData = await loadFromSupabase<T>(key);
-      if (supabaseData !== null && supabaseData !== undefined) return supabaseData;
-    } catch (err) {
+      if (supabaseData !== null && supabaseData !== undefined) {
+        return { data: supabaseData, existsInCloud: true };
+      }
+    } catch (err: any) {
       console.warn(`Supabase load notice for key ${key}:`, err);
     }
   }
 
-  return null;
+  return {
+    data: null,
+    existsInCloud: false,
+    error: firestoreError,
+  };
+}
+
+export async function loadFromCloud<T>(key: string): Promise<T | null> {
+  const res = await loadFromCloudWithStatus<T>(key);
+  return res.data;
 }
 
 export function subscribeToCloudKey<T>(
@@ -195,33 +443,56 @@ export function subscribeToCloudKey<T>(
 ): () => void {
   let unsubFirebase = () => {};
 
-  if (!isFirebaseQuotaExceeded) {
+  if (!isFirebaseReadQuotaExceeded) {
     try {
       const docRef = doc(db, 'erp_data', key);
       unsubFirebase = onSnapshot(
         docRef,
-        (snap) => {
-          if (snap.exists()) {
-            const data = snap.data();
-            if (data && data.payload !== undefined) {
-              callback(data.payload as T, {
-                updatedAt: data.updatedAt,
-                updatedBy: data.updatedBy,
-                updatedByClientId: data.updatedByClientId,
-                lastAction: data.lastAction,
-                actionDetail: data.actionDetail,
-                hasPendingWrites: snap.metadata.hasPendingWrites,
-                fromCache: snap.metadata.fromCache,
-              });
+        async (snap) => {
+          if (!snap.exists()) return;
+          const docData = snap.data();
+          if (!docData) return;
+
+          const meta: CloudSyncMeta = {
+            updatedAt: docData.updatedAt,
+            updatedBy: docData.updatedBy,
+            updatedByClientId: docData.updatedByClientId,
+            lastAction: docData.lastAction,
+            actionDetail: docData.actionDetail,
+            hasPendingWrites: snap.metadata.hasPendingWrites,
+            fromCache: snap.metadata.fromCache,
+          };
+
+          if (docData.isChunked && typeof docData.chunkCount === 'number') {
+            try {
+              const reassembled = await readChunkedPayload<T>(key, docData.chunkCount, !snap.metadata.fromCache);
+              if (reassembled !== null) {
+                updateCloudStatus({
+                  status: isFirebaseWriteQuotaExceeded ? 'quota-exceeded' : 'connected',
+                  lastSyncAt: new Date().toISOString(),
+                });
+                callback(reassembled, meta);
+              }
+            } catch (err) {
+              console.warn(`Failed to reassemble chunked snapshot for ${key}:`, err);
             }
+            return;
+          }
+
+          if (docData.payload !== undefined) {
+            updateCloudStatus({
+              status: isFirebaseWriteQuotaExceeded ? 'quota-exceeded' : 'connected',
+              lastSyncAt: new Date().toISOString(),
+            });
+            callback(docData.payload as T, meta);
           }
         },
         (err) => {
-          handleFirestoreError(err, `subscribeToCloudKey(${key})`);
+          classifyFirestoreError(err, OperationType.GET, `erp_data/${key}`);
         }
       );
     } catch (err) {
-      handleFirestoreError(err, `subscribeToCloudKey init (${key})`);
+      classifyFirestoreError(err, OperationType.GET, `erp_data/${key}`);
     }
   }
 
@@ -237,5 +508,3 @@ export function subscribeToCloudKey<T>(
     unsubSupabase();
   };
 }
-
-

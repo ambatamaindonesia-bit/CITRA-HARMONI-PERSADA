@@ -10,6 +10,7 @@ import {
   AppUser,
 } from '../types';
 import { formatRupiah } from '../utils/formatters';
+import { compressImageFile } from '../utils/imageCompress';
 import {
   HardHat,
   Package,
@@ -321,15 +322,12 @@ export const ConstructionManager: React.FC<ConstructionManagerProps> = ({
     setProgCheckedBy(currentUser?.name || 'Mandor Supri');
   };
 
-  // Handle Photo Upload
-  const handlePhotoFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+  // Handle Photo Upload (compressed for fast cross-device Cloud sync)
+  const handlePhotoFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (file) {
-      const reader = new FileReader();
-      reader.onloadend = () => {
-        setProgPhotoUrl(reader.result as string);
-      };
-      reader.readAsDataURL(file);
+      const compressed = await compressImageFile(file);
+      setProgPhotoUrl(compressed);
     }
   };
 

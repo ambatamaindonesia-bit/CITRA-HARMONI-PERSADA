@@ -2,7 +2,91 @@ rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
     match /{document=**} {
-      allow read, write: if true;
+      allow read, write: if false;
+    }
+
+    function isValidErpKey(docKey) {
+      return docKey is string &&
+        docKey.size() > 0 &&
+        docKey.size() <= 160 &&
+        docKey.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function isOptionalString(data, field, maxLen) {
+      return !(field in data) || (data[field] is string && data[field].size() <= maxLen);
+    }
+
+    function isValidStandardErpDoc(data) {
+      return data.keys().hasAll(['payload', 'updatedAt']) &&
+        data.keys().hasOnly([
+          'payload',
+          'updatedAt',
+          'updatedByClientId',
+          'updatedBy',
+          'lastAction',
+          'actionDetail'
+        ]) &&
+        data.updatedAt is string &&
+        data.updatedAt.size() > 0 &&
+        data.updatedAt.size() <= 64 &&
+        isOptionalString(data, 'updatedByClientId', 128) &&
+        isOptionalString(data, 'updatedBy', 200) &&
+        isOptionalString(data, 'lastAction', 128) &&
+        isOptionalString(data, 'actionDetail', 500);
+    }
+
+    function isValidChunkManifestDoc(data) {
+      return data.keys().hasAll(['isChunked', 'chunkCount', 'totalLength', 'updatedAt']) &&
+        data.keys().hasOnly([
+          'isChunked',
+          'chunkCount',
+          'totalLength',
+          'updatedAt',
+          'updatedByClientId',
+          'updatedBy',
+          'lastAction',
+          'actionDetail'
+        ]) &&
+        data.isChunked == true &&
+        data.chunkCount is int &&
+        data.chunkCount >= 1 &&
+        data.chunkCount <= 50 &&
+        data.totalLength is int &&
+        data.totalLength >= 0 &&
+        data.updatedAt is string &&
+        data.updatedAt.size() > 0 &&
+        data.updatedAt.size() <= 64 &&
+        isOptionalString(data, 'updatedByClientId', 128) &&
+        isOptionalString(data, 'updatedBy', 200) &&
+        isOptionalString(data, 'lastAction', 128) &&
+        isOptionalString(data, 'actionDetail', 500);
+    }
+
+    function isValidChunkItemDoc(docKey, data) {
+      return docKey.matches('^.+__chunk_[0-9]+$') &&
+        data.keys().hasAll(['chunkData', 'chunkIndex', 'updatedAt']) &&
+        data.keys().hasOnly(['chunkData', 'chunkIndex', 'updatedAt']) &&
+        data.chunkData is string &&
+        data.chunkIndex is int &&
+        data.chunkIndex >= 0 &&
+        data.chunkIndex < 50 &&
+        data.updatedAt is string &&
+        data.updatedAt.size() > 0 &&
+        data.updatedAt.size() <= 64;
+    }
+
+    match /test/connection {
+      allow get: if true;
+    }
+
+    match /erp_data/{docKey} {
+      allow get: if isValidErpKey(docKey);
+      allow create, update: if isValidErpKey(docKey) && (
+        isValidStandardErpDoc(request.resource.data) ||
+        isValidChunkManifestDoc(request.resource.data) ||
+        isValidChunkItemDoc(docKey, request.resource.data)
+      );
+      allow delete: if isValidErpKey(docKey) && docKey.matches('^.+__chunk_[0-9]+$');
     }
   }
 }
