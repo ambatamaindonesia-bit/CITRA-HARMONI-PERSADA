@@ -1,0 +1,432 @@
+export type UserRole = 'Super Admin' | 'Manager Marketing' | 'Finance & Kasir' | 'Legal & Sertifikat' | 'Sales Marketing';
+
+export type MarketingType = 'Inhouse' | 'Agent' | '-';
+
+export type TabType =
+  | 'dashboard'
+  | 'projects'
+  | 'siteplan'
+  | 'sales'
+  | 'user_data'
+  | 'prospects'
+  | 'prospect_reports'
+  | 'employees'
+  | 'attendance'
+  | 'user_access'
+  | 'kpr_calc'
+  | 'construction'
+  | 'finance'
+  | 'reports';
+
+export interface AppUser {
+  id: string;
+  username: string;
+  password?: string;
+  name: string;
+  email: string;
+  role: UserRole;
+  marketingType: MarketingType;
+  agencyName?: string; // e.g. 'Era Yusuf' or 'Independent Agent'
+  phone: string;
+  status: 'Aktif' | 'Nonaktif';
+  commissionRatePercent?: number;
+  notes?: string;
+  allowedTabs?: TabType[]; // Specific menu permissions set by admin
+}
+
+export const ALL_TAB_ITEMS: { id: TabType; label: string; description: string; superAdminOnly?: boolean }[] = [
+  { id: 'dashboard', label: 'Dashboard Overview', description: 'Metrik umum, ringkasan stok, dan omset' },
+  { id: 'projects', label: 'Proyek Perumahan', description: 'Kelola data proyek & master lokasi' },
+  { id: 'siteplan', label: 'Site Plan & Stok Unit', description: 'Peta denah visual & ketersediaan kavling' },
+  { id: 'sales', label: 'Penjualan & KPR (SPR)', description: 'Pemesanan rumah & status pemberkasan KPR' },
+  { id: 'user_data', label: 'Data User & Berkas KPR', description: 'Profil konsumen, KTP, KK, & syarat KPR' },
+  { id: 'prospects', label: 'Prospek User (Leads)', description: 'Input calon pembeli, sumber iklan, lokasi GPS & janji follow up' },
+  { id: 'prospect_reports', label: 'Report Database Prospek', description: 'Laporan database prospek konsumen (Khusus Admin & Manager)', superAdminOnly: true },
+  { id: 'employees', label: 'Karyawan & Marketing', description: 'Data sales inhouse & broker agen' },
+  { id: 'attendance', label: 'Absensi Karyawan', description: 'Absen masuk, absen pulang, lembur tanggal merah, & lokasi GPS' },
+  { id: 'user_access', label: 'Kelola Akses User ERP', description: 'Hak akses & manajemen akun (Khusus Admin)', superAdminOnly: true },
+  { id: 'kpr_calc', label: 'Kalkulator KPR', description: 'Simulasi angsuran & bunga bank' },
+  { id: 'construction', label: 'Konstruksi & Mandor', description: 'Progress fisik bangunan & SPK mandor' },
+  { id: 'finance', label: 'Keuangan & Cashflow', description: 'Jurnal kas, cash in/out & saldo' },
+  { id: 'reports', label: 'Laporan ERP Developer', description: 'Laporan keuangan, omset & stok unit' },
+];
+
+export const DEFAULT_ROLE_TABS: Record<UserRole, TabType[]> = {
+  'Super Admin': [
+    'dashboard', 'projects', 'siteplan', 'sales', 'user_data', 'prospects', 'prospect_reports',
+    'employees', 'attendance', 'user_access', 'kpr_calc', 'construction', 'finance', 'reports'
+  ],
+  'Manager Marketing': [
+    'dashboard', 'projects', 'siteplan', 'sales', 'user_data', 'prospects', 'prospect_reports',
+    'employees', 'attendance', 'kpr_calc', 'reports'
+  ],
+  'Finance & Kasir': [
+    'dashboard', 'projects', 'siteplan', 'sales', 'user_data', 'prospects',
+    'employees', 'attendance', 'finance', 'reports', 'kpr_calc'
+  ],
+  'Legal & Sertifikat': [
+    'dashboard', 'projects', 'sales', 'user_data', 'prospects', 'attendance', 'reports'
+  ],
+  'Sales Marketing': [
+    'dashboard', 'projects', 'siteplan', 'sales', 'user_data', 'prospects', 'attendance', 'kpr_calc'
+  ],
+};
+
+export function getUserAllowedTabs(user: AppUser | null): TabType[] {
+  if (!user) return ['dashboard'];
+
+  let tabs: TabType[] = [];
+  if (user.allowedTabs && user.allowedTabs.length > 0) {
+    tabs = [...user.allowedTabs];
+  } else {
+    tabs = DEFAULT_ROLE_TABS[user.role] || DEFAULT_ROLE_TABS['Sales Marketing'];
+  }
+
+  // Ensure user_access is strictly removed for non-Super Admin
+  if (user.role !== 'Super Admin') {
+    tabs = tabs.filter((t) => t !== 'user_access');
+  }
+
+  // Fallback if empty
+  if (tabs.length === 0) {
+    tabs = ['dashboard'];
+  }
+
+  return tabs;
+}
+
+export type UnitStatus = 'available' | 'booking' | 'sold' | 'construction' | 'reserved';
+
+export type PaymentType = 'cash_keras' | 'cash_bertahap' | 'kpr';
+
+export type KprStatus = 
+  | 'pemberkasan' 
+  | 'wawancara' 
+  | 'analisis_bank' 
+  | 'sp3k_disetujui' 
+  | 'akad_kredit' 
+  | 'cair_stage_1' 
+  | 'cair_100';
+
+export interface Unit {
+  id: string;
+  projectId: string;
+  projectName: string;
+  block: string;
+  number: string;
+  unitCode: string; // e.g. A-01
+  type: string; // e.g. Tipe 36/72, Tipe 45/90
+  landArea: number; // m2
+  buildingArea: number; // m2
+  priceCash: number;
+  priceKpr: number;
+  bookingFee: number;
+  minDp: number;
+  status: UnitStatus;
+  progressPercent: number; // 0 - 100%
+  facing: 'Utara' | 'Selatan' | 'Timur' | 'Barat';
+  bedrooms: number;
+  bathrooms: number;
+  specifications: {
+    pondasi: string;
+    dinding: string;
+    atap: string;
+    lantai: string;
+    listrik: string;
+    air: string;
+  };
+  notes?: string;
+}
+
+export interface HousingProject {
+  id: string;
+  name: string; // e.g. Yusuf Grand Residence
+  location: string; // e.g. Sukajadi, Bandung / Cibubur, Bogor
+  city: string;
+  totalUnits: number;
+  unitsAvailable: number;
+  unitsBooking: number;
+  unitsSold: number;
+  landSizeHa: number; // Hektar
+  status: 'planning' | 'active' | 'sold_out' | 'handover';
+  developerLegal: string; // e.g. PT Yusuf Property Indonesia - SHGB & PBG Lengkap
+  startingPrice: number;
+  facilities: string[];
+  imageUrl?: string;
+}
+
+export interface Buyer {
+  id: string;
+  name: string;
+  nik: string;
+  phone: string;
+  email: string;
+  address: string;
+  job: string;
+  monthlyIncome: number;
+}
+
+export interface SalesTransaction {
+  id: string;
+  sprNumber: string; // e.g. SPR/YP/2026/089
+  unitId: string;
+  unitCode: string;
+  projectName: string;
+  buyer: Buyer;
+  marketingAgent: string;
+  transactionDate: string;
+  paymentType: PaymentType;
+  agreedPrice: number;
+  bookingFeePaid: number;
+  dpAmount: number;
+  dpPaid: number;
+  kprBank?: string; // BTN, BSI, Mandiri, BRI, etc.
+  kprAmount?: number;
+  kprStatus?: KprStatus;
+  sp3kNumber?: string;
+  sp3kDate?: string;
+  notes?: string;
+  createdBy?: string;
+  createdAt?: string;
+  updatedBy?: string;
+  updatedAt?: string;
+  isBackdate?: boolean;
+  backdateDate?: string;
+  backdateNotes?: string;
+  statusLogs?: { timestamp: string; user: string; oldStatus: string; newStatus: string; notes?: string }[];
+}
+
+export interface ConstructionMilestone {
+  id: string;
+  unitId: string;
+  unitCode: string;
+  projectName: string;
+  contractorName: string;
+  stageName: string; // e.g. Pekerjaan Pondasi & Stiuktur, Pasang Bata & Plester, Atap & Plafon, Finishing
+  targetCompletionDate: string;
+  progressPercent: number;
+  budgetAllocated: number;
+  budgetSpent: number;
+  status: 'pending' | 'in_progress' | 'completed' | 'delayed';
+  lastUpdated: string;
+}
+
+export interface TransactionAuditLog {
+  id: string;
+  timestamp: string;
+  action: 'CREATE' | 'EDIT' | 'DELETE' | 'RESTORE';
+  user: string;
+  reason: string;
+  changesSummary?: string;
+  isBackdate?: boolean;
+  backdateDate?: string;
+  backdateReason?: string;
+}
+
+export interface FinancialRecord {
+  id: string;
+  date: string;
+  type: 'income' | 'expense';
+  category: 'dp_pembayaran' | 'pencairan_kpr' | 'booking_fee' | 'material_konstruksi' | 'gaji_mandor' | 'legal_sertifikat' | 'pemasaran' | 'lainnya';
+  title: string;
+  amount: number;
+  projectName: string;
+  unitCode?: string;
+  paymentMethod: string;
+  sourceBank?: string;
+  senderBankName?: string;
+  destinationBank?: string;
+  destinationAccountNumber?: string;
+  destinationAccountName?: string;
+  payerName?: string;
+  payerRelationship?: string;
+  refNumber: string;
+  recordedBy: string;
+  isDeleted?: boolean;
+  deletedAt?: string;
+  deleteReason?: string;
+  deletedBy?: string;
+  isBackdate?: boolean;
+  backdateDate?: string;
+  backdateReason?: string;
+  auditLogs?: TransactionAuditLog[];
+}
+
+export type KprDocumentStatus = 'belum_ada' | 'terupload' | 'terverifikasi' | 'ditolak';
+
+export interface KprDocumentItem {
+  id: string;
+  code: string;
+  name: string;
+  category: 'Identitas Pribadi' | 'Dokumen Legalitas' | 'Penghasilan & Pekerjaan' | 'Formulir Bank & Perusahaan';
+  isRequired: boolean;
+  status: KprDocumentStatus;
+  fileName?: string;
+  fileSize?: string;
+  uploadDate?: string;
+  uploadedBy?: string;
+  verifiedBy?: string;
+  verifiedAt?: string;
+  fileUrl?: string;
+  notes?: string;
+}
+
+export interface CustomerProfile {
+  id: string;
+  name: string;
+  nik: string;
+  phone: string;
+  email: string;
+  address: string;
+  maritalStatus: 'Lajang' | 'Menikah' | 'Duda / Janda';
+  jobTitle: string;
+  companyName: string;
+  monthlyIncome: number;
+  projectName: string;
+  unitCode: string;
+  kprBankTarget: string;
+  kprPlafonRequest: number;
+  statusPemberkasan: 'Belum Lengkap' | 'Lengkap & Terverifikasi' | 'Dalam Proses Bank';
+  marketingAgent?: string; // Sales agent / marketing in charge
+  documents: KprDocumentItem[];
+  notes?: string;
+  sprNumber?: string;
+  sprPrintedAt?: string;
+  sprPrintedBy?: string;
+  createdBy?: string;
+  createdAt: string;
+  updatedBy?: string;
+  updatedAt: string;
+}
+
+export interface MaterialItem {
+  id: string;
+  projectName: string;
+  name: string; // e.g., Semen Gresik 50kg, Besi Beton 10mm, Pasir Pasang
+  unitCategory: string; // e.g., Sak, Batang, M3, Truk, Dus, Btg, Roll
+  stockQty: number;
+  unitPrice: number;
+  lastUpdated: string;
+}
+
+export interface MaterialUsageHistory {
+  editedAt: string;
+  editedBy: string;
+  editReason: string;
+  prevQuantity: number;
+  prevUnitCode: string;
+  prevReasonUsage: string;
+}
+
+export interface MaterialUsageRecord {
+  id: string;
+  materialId: string;
+  materialName: string;
+  unitCategory: string;
+  projectName: string;
+  unitId: string; // Reference to stock unit
+  unitCode: string; // e.g. A-01 (Blok A No. 01)
+  quantityUsed: number;
+  usageDate: string;
+  personInCharge: string; // Mandor / Supervisor
+  reasonUsage: string; // Alasan & tujuan spesifik pemakaian
+  editHistory?: MaterialUsageHistory[];
+  createdAt: string;
+}
+
+export type ExecutorType = 'Inhouse' | 'Kontraktor';
+
+export interface ProgressDocumentation {
+  id: string;
+  projectName: string;
+  unitId: string; // Reference to stock unit
+  unitCode: string; // e.g., Blok A No. 01
+  executorType: ExecutorType; // Inhouse (Mandor Internal) / Kontraktor (Eksternal)
+  executorName: string; // Nama Mandor / Nama Kontraktor
+  inspectionDate: string; // Tanggal check
+  stageName: string; // e.g., Pondasi, Dinding, Atap, Finishing
+  progressPercent: number; // 0 - 100%
+  photoUrl?: string; // Image base64 data / URL
+  conditionNotes: string; // Catatan & kondisi hasil inspeksi mandor
+  checkedBy: string; // Inspektur / Mandor yang bertugas
+  createdAt: string;
+}
+
+export interface KprSimulationQuery {
+  price: number;
+  dpPercent: number;
+  interestRateYear: number;
+  tenorYears: number;
+}
+
+export type AttendanceType = 'Absen Masuk' | 'Absen Pulang' | 'Lembur (Tgl Merah)';
+
+export interface AttendanceRecord {
+  id: string;
+  employeeId: string;
+  employeeName: string;
+  employeeRole: string;
+  date: string; // YYYY-MM-DD
+  attendanceType: AttendanceType;
+  clockInTime: string; // e.g. "08:00:00"
+  clockOutTime?: string; // e.g. "17:00:00"
+  locationName: string; // e.g., "Grand Yusuf Residence (Proyek A)", "Kantor Pusat Developer", "Lokasi GPS Karyawan"
+  coordinates?: { lat: number; lng: number };
+  locationAddress?: string; // Lat/Long string or address
+  workDurationMinutes?: number; // Total calculated minutes worked
+  workDurationFormatted?: string; // e.g. "8 Jam 30 Menit"
+  isOvertimeHoliday?: boolean; // Lembur Tanggal Merah
+  notes?: string; // Keterangan tugas / lembur
+  createdAt: string;
+}
+
+export type ProspectSource =
+  | 'Iklan Medsos'
+  | 'Visit Lokasi Langsung'
+  | 'Sebar Brosur'
+  | 'Referensi';
+
+export type ProspectStatus =
+  | 'Berminat'
+  | 'Cuma Tanya-tanya'
+  | 'Masih Dirundingkan'
+  | 'Minta Nego Harga'
+  | 'Proses KPR / Pemberkasan'
+  | 'Deal / Booking Kavling'
+  | 'Batal / Tidak Berminat';
+
+export interface ProspectFollowUp {
+  id: string;
+  date: string; // YYYY-MM-DD
+  time?: string; // e.g. "14:00"
+  type: 'Janji Ketemuan Lagi' | 'Telepon / WA Follow Up' | 'Survey Lokasi' | 'Negosiasi Harga';
+  notes: string;
+  isCompleted?: boolean;
+}
+
+export interface ProspectRecord {
+  id: string;
+  name: string; // Nama calon user / prospect
+  phone: string; // No telepon / WA
+  address: string; // Alamat prospect
+  source: ProspectSource;
+  sourceReferenceDetail?: string; // Detail jika sumber = 'Referensi' (misal: "Ref dari Pak Andi Tetangga")
+  status: ProspectStatus;
+  projectNameInterest?: string; // Proyek yang diminati
+  preferredUnitType?: string; // Tipe rumah / kavling
+  agentId: string; // ID user / marketing yang input
+  agentName: string; // Nama marketing yang input (berdasarkan user login)
+  agentRole: string; // Role user yang input
+  photoUrl?: string; // Bukti foto dengan user yang ditemui / lokasi
+  locationName?: string; // Lokasi GPS / Tempat pertemuan
+  locationAddress?: string; // Detail alamat GPS / koordinat
+  coordinates?: { lat: number; lng: number };
+  nextFollowUpDate?: string; // Tanggal janji ketemuan / follow up berikutnya
+  nextFollowUpTime?: string;
+  nextFollowUpType?: 'Janji Ketemuan Lagi' | 'Telepon / WA Follow Up' | 'Survey Lokasi' | 'Negosiasi Harga';
+  nextFollowUpNotes?: string;
+  followUpHistory?: ProspectFollowUp[];
+  notes?: string; // Catatan hasil diskusi / kebutuhan konsumen
+  createdAt: string;
+  updatedAt?: string;
+}
