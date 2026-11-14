@@ -20,6 +20,10 @@ import {
   Layers,
   RotateCcw,
   Radio,
+  Eye,
+  Landmark,
+  CreditCard,
+  X,
 } from 'lucide-react';
 
 interface FinanceManagerProps {
@@ -43,9 +47,16 @@ export const FinanceManager: React.FC<FinanceManagerProps> = ({
 }) => {
   const [selectedMonthKey, setSelectedMonthKey] = useState<string>('all');
   const [filterType, setFilterType] = useState<string>('active');
+  const [searchQuery, setSearchQuery] = useState<string>('');
   const [showAddModal, setShowAddModal] = useState<boolean>(false);
 
-  // Modals for Edit, Delete, Permanent Delete & Audit History
+  // Modals for Detail, Edit, Delete, Permanent Delete & Audit History
+  const [detailRecord, setDetailRecord] = useState<FinancialRecord | null>(null);
+  const activeDetailRecord = useMemo(
+    () => (detailRecord ? finances.find((f) => f.id === detailRecord.id) || null : null),
+    [detailRecord, finances]
+  );
+
   const [editingRecord, setEditingRecord] = useState<FinancialRecord | null>(null);
   const [editReason, setEditReason] = useState<string>('');
 
@@ -64,23 +75,37 @@ export const FinanceManager: React.FC<FinanceManagerProps> = ({
   const [title, setTitle] = useState('');
   const [amount, setAmount] = useState(5000000);
   const [type, setType] = useState<'income' | 'expense'>('income');
-  const [category, setCategory] = useState<any>('dp_pembayaran');
+  const [category, setCategory] = useState<FinancialRecord['category']>('dp_pembayaran');
   const [projectName, setProjectName] = useState('Grand Yusuf Residence');
-  const [unitCode, setUnitCode] = useState('A-02');
+  const [unitCode, setUnitCode] = useState('');
   const [paymentMethod, setPaymentMethod] = useState<string>('Transfer Bank');
   const [sourceBank, setSourceBank] = useState<string>('Bank BCA');
   const [senderBankName, setSenderBankName] = useState<string>('Bank BCA');
+  const [senderAccountNumber, setSenderAccountNumber] = useState<string>('');
   const [destinationBank, setDestinationBank] = useState<string>('Bank BCA');
   const [destinationBankCustom, setDestinationBankCustom] = useState<string>('');
   const [destinationAccountNumber, setDestinationAccountNumber] = useState<string>('');
   const [destinationAccountName, setDestinationAccountName] = useState<string>('');
   const [payerName, setPayerName] = useState('');
   const [payerRelationship, setPayerRelationship] = useState('Konsumen Langsung (Pribadi)');
+  const [recipientRelationship, setRecipientRelationship] = useState('Rekening Perusahaan (PT Yusuf Property)');
+  const [transactionNotes, setTransactionNotes] = useState('');
 
   // Backdate options for New Record Form
   const [isBackdate, setIsBackdate] = useState<boolean>(false);
   const [backdateDate, setBackdateDate] = useState<string>(new Date().toISOString().split('T')[0]);
   const [backdateReason, setBackdateReason] = useState<string>('');
+
+  const CATEGORY_LABELS: Record<FinancialRecord['category'], string> = {
+    booking_fee: 'Booking Fee / UTJ',
+    dp_pembayaran: 'Pembayaran Uang Muka (DP)',
+    pencairan_kpr: 'Pencairan KPR Bank',
+    material_konstruksi: 'Pembelian Material Konstruksi',
+    gaji_mandor: 'Upah Mandor & Pekerja',
+    legal_sertifikat: 'Legalitas & Sertifikat',
+    pemasaran: 'Biaya Pemasaran / Komisi',
+    lainnya: 'Operasional / Lainnya',
+  };
 
   // Active (non-deleted) records for calculation
   const activeFinances = useMemo(() => finances.filter((f) => !f.isDeleted), [finances]);
@@ -157,8 +182,33 @@ export const FinanceManager: React.FC<FinanceManagerProps> = ({
 
   // Running balance calculation for display table (chronological order)
   const displayFinancesWithRunningBalance = useMemo(() => {
+    const q = searchQuery.trim().toLowerCase();
+    const matchesSearch = (f: FinancialRecord) => {
+      if (!q) return true;
+      return [
+        f.title,
+        f.refNumber,
+        f.projectName,
+        f.unitCode,
+        f.payerName,
+        f.payerRelationship,
+        f.senderBankName,
+        f.sourceBank,
+        f.senderAccountNumber,
+        f.destinationBank,
+        f.destinationAccountNumber,
+        f.destinationAccountName,
+        f.recipientRelationship,
+        f.recordedBy,
+      ]
+        .filter(Boolean)
+        .some((val) => String(val).toLowerCase().includes(q));
+    };
+
     if (filterType === 'deleted') {
-      return finances.filter((f) => f.isDeleted).map((f) => ({ record: f, runningBalance: 0 }));
+      return finances
+        .filter((f) => f.isDeleted && matchesSearch(f))
+        .map((f) => ({ record: f, runningBalance: 0 }));
     }
 
     let baseList = currentMonthFinances;
@@ -169,7 +219,7 @@ export const FinanceManager: React.FC<FinanceManagerProps> = ({
     }
 
     let running = saldoAwalBulan;
-    return baseList.map((f) => {
+    const withRunning = baseList.map((f) => {
       if (f.type === 'income') {
         running += f.amount;
       } else {
@@ -180,7 +230,9 @@ export const FinanceManager: React.FC<FinanceManagerProps> = ({
         runningBalance: running,
       };
     });
-  }, [currentMonthFinances, filterType, finances, saldoAwalBulan]);
+
+    return q ? withRunning.filter(({ record }) => matchesSearch(record)) : withRunning;
+  }, [currentMonthFinances, filterType, finances, saldoAwalBulan, searchQuery]);
 
   // Handle create new record
   const handleSubmitNewRecord = (e: React.FormEvent) => {
@@ -201,11 +253,15 @@ export const FinanceManager: React.FC<FinanceManagerProps> = ({
       destinationBank === 'Lainnya' ? destinationBankCustom.trim() : destinationBank;
 
     const bankSummaryParts: string[] = [];
-    if (resolvedBankLabel) bankSummaryParts.push(`Dari: ${resolvedBankLabel}`);
+    if (resolvedBankLabel || payerName.trim() || senderAccountNumber.trim()) {
+      bankSummaryParts.push(
+        `Pengirim: ${payerName.trim() || '-'} (${resolvedBankLabel || '-'}${senderAccountNumber.trim() ? ` - ${senderAccountNumber.trim()}` : ''})`
+      );
+    }
     if (resolvedDestinationBank || destinationAccountNumber.trim() || destinationAccountName.trim()) {
       const destBankPrefix = resolvedDestinationBank ? `${resolvedDestinationBank} ` : '';
       bankSummaryParts.push(
-        `Tujuan: ${destBankPrefix}${destinationAccountNumber.trim() || '-'}${destinationAccountName.trim() ? ` (a.n. ${destinationAccountName.trim()})` : ''}`
+        `Penerima: ${destinationAccountName.trim() || '-'} (${destBankPrefix}${destinationAccountNumber.trim() || '-'})`
       );
     }
 
@@ -229,15 +285,18 @@ export const FinanceManager: React.FC<FinanceManagerProps> = ({
       title,
       amount,
       projectName,
-      unitCode,
+      unitCode: unitCode.trim() || undefined,
       paymentMethod: resolvedPaymentMethod,
       sourceBank: sourceBank || undefined,
       senderBankName: senderBankName.trim() || undefined,
+      senderAccountNumber: senderAccountNumber.trim() || undefined,
       destinationBank: resolvedDestinationBank || undefined,
       destinationAccountNumber: destinationAccountNumber.trim() || undefined,
       destinationAccountName: destinationAccountName.trim() || undefined,
       payerName: payerName.trim() || undefined,
       payerRelationship,
+      recipientRelationship: recipientRelationship.trim() || undefined,
+      transactionNotes: transactionNotes.trim() || undefined,
       refNumber: `TRF/YP/${Date.now().toString().slice(-4)}`,
       recordedBy,
       isBackdate,
@@ -249,14 +308,19 @@ export const FinanceManager: React.FC<FinanceManagerProps> = ({
     onAddFinanceRecord(newRecord);
     setShowAddModal(false);
     setTitle('');
+    setUnitCode('');
     setPaymentMethod('Transfer Bank');
     setSourceBank('Bank BCA');
     setSenderBankName('Bank BCA');
+    setSenderAccountNumber('');
     setDestinationBank('Bank BCA');
     setDestinationBankCustom('');
     setDestinationAccountNumber('');
     setDestinationAccountName('');
     setPayerName('');
+    setPayerRelationship('Konsumen Langsung (Pribadi)');
+    setRecipientRelationship('Rekening Perusahaan (PT Yusuf Property)');
+    setTransactionNotes('');
     setIsBackdate(false);
     setBackdateReason('');
   };
@@ -296,11 +360,15 @@ export const FinanceManager: React.FC<FinanceManagerProps> = ({
       original &&
       (original.sourceBank !== editingRecord.sourceBank ||
         original.senderBankName !== editingRecord.senderBankName ||
+        original.senderAccountNumber !== editingRecord.senderAccountNumber ||
+        original.payerName !== editingRecord.payerName ||
+        original.payerRelationship !== editingRecord.payerRelationship ||
         original.destinationBank !== editingRecord.destinationBank ||
         original.destinationAccountNumber !== editingRecord.destinationAccountNumber ||
-        original.destinationAccountName !== editingRecord.destinationAccountName)
+        original.destinationAccountName !== editingRecord.destinationAccountName ||
+        original.recipientRelationship !== editingRecord.recipientRelationship)
     ) {
-      summaryText = `Detail bank pengirim / rekening tujuan pembayaran diperbarui${backdateNotice}`;
+      summaryText = `Informasi pengirim / penerima dana transaksi diperbarui${backdateNotice}`;
     } else if (editingRecord.isBackdate) {
       summaryText = `Pembaruan data & status backdate (${editingRecord.date})`;
     }
@@ -505,6 +573,18 @@ export const FinanceManager: React.FC<FinanceManagerProps> = ({
           </div>
 
           <div className="flex items-center gap-2 flex-wrap">
+            {/* Search Box */}
+            <div className="relative">
+              <Search className="w-3.5 h-3.5 text-slate-400 absolute left-2.5 top-1/2 -translate-y-1/2" />
+              <input
+                type="text"
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                placeholder="Cari ref, pengirim, penerima..."
+                className="pl-8 pr-3 py-1.5 bg-slate-50 border border-slate-200 rounded-xl text-xs font-medium text-slate-800 focus:outline-none focus:ring-2 focus:ring-amber-400 w-48 sm:w-56"
+              />
+            </div>
+
             {/* Month Selector */}
             <div className="flex items-center gap-1.5 bg-slate-100 p-1 rounded-xl border border-slate-200">
               <Calendar className="w-3.5 h-3.5 text-slate-500 ml-1.5" />
@@ -576,10 +656,10 @@ export const FinanceManager: React.FC<FinanceManagerProps> = ({
                 <th className="p-3 rounded-tl-xl">Tanggal / Ref</th>
                 <th className="p-3">Keterangan Transaksi</th>
                 <th className="p-3">Proyek / Unit</th>
-                <th className="p-3">Metode, Bank & Tujuan</th>
+                <th className="p-3">Pengirim & Penerima Dana</th>
                 <th className="p-3 text-right">Cash In / Out</th>
                 <th className="p-3 text-right bg-slate-800 text-amber-400">Saldo Akumulasi</th>
-                <th className="p-3 text-center rounded-tr-xl">Audit</th>
+                <th className="p-3 text-center rounded-tr-xl">Detail & Audit</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100 text-xs text-slate-700">
@@ -642,14 +722,31 @@ export const FinanceManager: React.FC<FinanceManagerProps> = ({
                     </td>
 
                     <td className="p-3 font-medium text-slate-900">
-                      <div className="flex items-center gap-1.5">
+                      <button
+                        type="button"
+                        onClick={() => setDetailRecord(f)}
+                        className="text-left group flex items-start gap-1.5 hover:text-amber-700 transition-colors cursor-pointer"
+                        title="Klik untuk melihat detail lengkap transaksi & pengirim/penerima dana"
+                      >
                         {f.type === 'income' ? (
-                          <ArrowDownRight className="w-3.5 h-3.5 text-emerald-600 flex-shrink-0" />
+                          <ArrowDownRight className="w-3.5 h-3.5 text-emerald-600 flex-shrink-0 mt-0.5" />
                         ) : (
-                          <ArrowUpRight className="w-3.5 h-3.5 text-rose-600 flex-shrink-0" />
+                          <ArrowUpRight className="w-3.5 h-3.5 text-rose-600 flex-shrink-0 mt-0.5" />
                         )}
-                        <span className={f.isDeleted ? 'line-through text-slate-400' : ''}>{f.title}</span>
-                      </div>
+                        <div>
+                          <span className={f.isDeleted ? 'line-through text-slate-400' : 'font-semibold group-hover:underline'}>
+                            {f.title}
+                          </span>
+                          <div className="flex items-center gap-1.5 mt-0.5 flex-wrap">
+                            <span className="px-1.5 py-0.2 bg-slate-100 text-slate-600 rounded text-[9px] font-bold">
+                              {CATEGORY_LABELS[f.category] || f.category}
+                            </span>
+                            <span className="text-[10px] text-amber-700 font-semibold group-hover:text-amber-900">
+                              Lihat Detail →
+                            </span>
+                          </div>
+                        </div>
+                      </button>
                       {f.isBackdate && f.backdateReason && (
                         <div className="text-[10px] text-purple-700 font-semibold mt-0.5 flex items-center gap-1">
                           <span>📌 Ket. Backdate:</span>
@@ -666,37 +763,52 @@ export const FinanceManager: React.FC<FinanceManagerProps> = ({
                     <td className="p-3">
                       <div className="font-semibold text-slate-800">{f.projectName}</div>
                       {f.unitCode && <div className="text-[10px] text-amber-600 font-bold">Blok {f.unitCode}</div>}
+                      <div className="text-[10px] text-slate-400 mt-0.5">Oleh: {f.recordedBy}</div>
                     </td>
 
-                    <td className="p-3 font-medium text-slate-600">
-                      <div className="font-semibold text-slate-800">{f.paymentMethod}</div>
-                      {(f.sourceBank || f.senderBankName) && (
-                        <div className="text-[10px] text-slate-600 mt-0.5">
-                          Bank Pengirim:{' '}
-                          <strong className="text-slate-800">
-                            {f.senderBankName || f.sourceBank}
-                          </strong>
-                          {f.sourceBank && f.senderBankName && f.sourceBank !== f.senderBankName && (
-                            <span className="text-slate-400"> ({f.sourceBank})</span>
+                    <td className="p-3 font-medium text-slate-600 min-w-[230px]">
+                      <div className="font-bold text-slate-800 text-[11px] mb-1">{f.paymentMethod}</div>
+                      <div className="space-y-1">
+                        {/* Info Pengirim Dana */}
+                        <div className="text-[10px] bg-amber-50/80 border border-amber-200/80 rounded-lg px-2 py-1 text-slate-700">
+                          <span className="font-extrabold text-amber-900 uppercase tracking-wide text-[9px] block">
+                            Pengirim Dana
+                          </span>
+                          <div>
+                            <strong className="text-slate-900">
+                              {f.payerName || (f.type === 'expense' ? 'PT Yusuf Property Indonesia' : '-')}
+                            </strong>
+                            {f.payerRelationship && (
+                              <span className="text-slate-500"> ({f.payerRelationship})</span>
+                            )}
+                          </div>
+                          {(f.senderBankName || f.sourceBank || f.senderAccountNumber) && (
+                            <div className="text-slate-600 font-mono text-[9.5px]">
+                              {[f.senderBankName || f.sourceBank, f.senderAccountNumber].filter(Boolean).join(' • ')}
+                            </div>
                           )}
                         </div>
-                      )}
-                      {f.payerName && (
-                        <div className="text-[10px] text-slate-500">
-                          a.n. <strong className="text-slate-700">{f.payerName}</strong> ({f.payerRelationship || 'Pribadi'})
-                        </div>
-                      )}
-                      {(f.destinationBank || f.destinationAccountNumber || f.destinationAccountName) && (
-                        <div className="text-[10px] text-emerald-700 bg-emerald-50 border border-emerald-200/80 rounded px-1.5 py-0.5 mt-1 inline-block">
-                          Tujuan:{' '}
-                          <strong className="font-bold">
-                            {[f.destinationBank, f.destinationAccountNumber].filter(Boolean).join(' - ') || '-'}
-                          </strong>
-                          {f.destinationAccountName && (
-                            <span> (a.n. <strong>{f.destinationAccountName}</strong>)</span>
+
+                        {/* Info Penerima Dana */}
+                        <div className="text-[10px] bg-emerald-50/80 border border-emerald-200/80 rounded-lg px-2 py-1 text-emerald-900">
+                          <span className="font-extrabold text-emerald-800 uppercase tracking-wide text-[9px] block">
+                            Penerima Dana
+                          </span>
+                          <div>
+                            <strong className="text-emerald-950">
+                              {f.destinationAccountName || (f.type === 'income' ? 'PT Yusuf Property Indonesia' : '-')}
+                            </strong>
+                            {f.recipientRelationship && (
+                              <span className="text-emerald-700"> ({f.recipientRelationship})</span>
+                            )}
+                          </div>
+                          {(f.destinationBank || f.destinationAccountNumber) && (
+                            <div className="text-emerald-800 font-mono text-[9.5px]">
+                              {[f.destinationBank, f.destinationAccountNumber].filter(Boolean).join(' • ')}
+                            </div>
                           )}
                         </div>
-                      )}
+                      </div>
                     </td>
 
                     <td
@@ -712,11 +824,20 @@ export const FinanceManager: React.FC<FinanceManagerProps> = ({
                     </td>
 
                     <td className="p-3 text-center">
-                      <div className="flex items-center justify-center gap-1.5">
+                      <div className="flex items-center justify-center gap-1">
+                        {/* Detail Transaction View Button */}
+                        <button
+                          onClick={() => setDetailRecord(f)}
+                          className="p-1.5 text-indigo-600 hover:text-indigo-800 hover:bg-indigo-50 rounded-lg transition-all cursor-pointer"
+                          title="Lihat Detail Transaksi (Pengirim & Penerima Dana)"
+                        >
+                          <Eye className="w-4 h-4" />
+                        </button>
+
                         {/* Audit History Log Button */}
                         <button
                           onClick={() => setAuditRecord(f)}
-                          className="p-1.5 text-slate-500 hover:text-slate-900 hover:bg-slate-100 rounded-lg transition-all relative"
+                          className="p-1.5 text-slate-500 hover:text-slate-900 hover:bg-slate-100 rounded-lg transition-all relative cursor-pointer"
                           title="Lihat Riwayat History Audit"
                         >
                           <History className="w-4 h-4" />
@@ -818,16 +939,46 @@ export const FinanceManager: React.FC<FinanceManagerProps> = ({
             </div>
 
             <form onSubmit={handleSubmitNewRecord} className="p-5 space-y-4 text-xs overflow-y-auto">
-              <div className="grid grid-cols-2 gap-3">
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                 <div>
                   <label className="font-bold text-slate-700 block mb-1">Jenis Transaksi</label>
                   <select
                     value={type}
-                    onChange={(e) => setType(e.target.value as any)}
+                    onChange={(e) => {
+                      const nextType = e.target.value as 'income' | 'expense';
+                      setType(nextType);
+                      if (nextType === 'expense') {
+                        setCategory('material_konstruksi');
+                        setRecipientRelationship('Supplier / Vendor / Mandor');
+                        setPayerRelationship('Perusahaan / PT');
+                      } else {
+                        setCategory('dp_pembayaran');
+                        setRecipientRelationship('Rekening Perusahaan (PT Yusuf Property)');
+                        setPayerRelationship('Konsumen Langsung (Pribadi)');
+                      }
+                    }}
                     className="w-full p-2 bg-slate-50 border border-slate-200 rounded-lg font-bold"
                   >
                     <option value="income">Pemasukan (+)</option>
                     <option value="expense">Pengeluaran (-)</option>
+                  </select>
+                </div>
+
+                <div>
+                  <label className="font-bold text-slate-700 block mb-1">Kategori</label>
+                  <select
+                    value={category}
+                    onChange={(e) => setCategory(e.target.value as FinancialRecord['category'])}
+                    className="w-full p-2 bg-slate-50 border border-slate-200 rounded-lg font-bold"
+                  >
+                    <option value="booking_fee">Booking Fee / UTJ</option>
+                    <option value="dp_pembayaran">Pembayaran Uang Muka (DP)</option>
+                    <option value="pencairan_kpr">Pencairan KPR Bank</option>
+                    <option value="material_konstruksi">Material Konstruksi</option>
+                    <option value="gaji_mandor">Upah Mandor & Pekerja</option>
+                    <option value="legal_sertifikat">Legal & Sertifikat</option>
+                    <option value="pemasaran">Pemasaran / Komisi</option>
+                    <option value="lainnya">Operasional / Lainnya</option>
                   </select>
                 </div>
 
@@ -855,13 +1006,23 @@ export const FinanceManager: React.FC<FinanceManagerProps> = ({
                 />
               </div>
 
-              <div className="grid grid-cols-2 gap-3">
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                 <div>
                   <label className="font-bold text-slate-700 block mb-1">Proyek</label>
                   <input
                     type="text"
                     value={projectName}
                     onChange={(e) => setProjectName(e.target.value)}
+                    className="w-full p-2 bg-slate-50 border border-slate-200 rounded-lg"
+                  />
+                </div>
+                <div>
+                  <label className="font-bold text-slate-700 block mb-1">Blok / Unit (Opsional)</label>
+                  <input
+                    type="text"
+                    placeholder="Contoh: A-02"
+                    value={unitCode}
+                    onChange={(e) => setUnitCode(e.target.value)}
                     className="w-full p-2 bg-slate-50 border border-slate-200 rounded-lg"
                   />
                 </div>
@@ -949,35 +1110,47 @@ export const FinanceManager: React.FC<FinanceManagerProps> = ({
 
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                   <div>
-                    <label className="font-bold text-amber-900 block mb-1">Pembayaran Atas Nama</label>
+                    <label className="font-bold text-amber-900 block mb-1">Nama Pengirim / Pemilik Rekening</label>
                     <input
                       type="text"
-                      placeholder="Nama pemilik rekening / pengirim"
+                      placeholder="Nama lengkap pengirim dana"
                       value={payerName}
                       onChange={(e) => setPayerName(e.target.value)}
                       className="w-full p-2 bg-white border border-amber-200 rounded-lg font-medium"
                     />
                   </div>
                   <div>
-                    <label className="font-bold text-amber-900 block mb-1">Hubungan Pengirim</label>
-                    <select
-                      value={payerRelationship}
-                      onChange={(e) => setPayerRelationship(e.target.value)}
-                      className="w-full p-2 bg-white border border-amber-200 rounded-lg font-medium"
-                    >
-                      <option value="Konsumen Langsung (Pribadi)">Konsumen Langsung (Pribadi)</option>
-                      <option value="Pasangan (Suami / Istri)">Pasangan (Suami / Istri)</option>
-                      <option value="Orang Tua / Anak">Orang Tua / Anak</option>
-                      <option value="Perusahaan / PT">Perusahaan / PT</option>
-                    </select>
+                    <label className="font-bold text-amber-900 block mb-1">No. Rekening Pengirim (Opsional)</label>
+                    <input
+                      type="text"
+                      placeholder="Contoh: 8820192831"
+                      value={senderAccountNumber}
+                      onChange={(e) => setSenderAccountNumber(e.target.value)}
+                      className="w-full p-2 bg-white border border-amber-200 rounded-lg font-mono text-slate-900"
+                    />
                   </div>
+                </div>
+
+                <div>
+                  <label className="font-bold text-amber-900 block mb-1">Hubungan / Status Pengirim</label>
+                  <select
+                    value={payerRelationship}
+                    onChange={(e) => setPayerRelationship(e.target.value)}
+                    className="w-full p-2 bg-white border border-amber-200 rounded-lg font-medium"
+                  >
+                    <option value="Konsumen Langsung (Pribadi)">Konsumen Langsung (Pribadi)</option>
+                    <option value="Pasangan (Suami / Istri)">Pasangan (Suami / Istri)</option>
+                    <option value="Orang Tua / Anak">Orang Tua / Anak</option>
+                    <option value="Perusahaan / PT">Perusahaan / PT</option>
+                    <option value="Bank / Lembaga Pembiayaan">Bank / Lembaga Pembiayaan</option>
+                  </select>
                 </div>
               </div>
 
-              {/* Rekening Tujuan Pembayaran */}
+              {/* Informasi Penerima Dana & Rekening Tujuan */}
               <div className="p-3 bg-emerald-50/70 rounded-xl border border-emerald-200/80 space-y-3">
                 <div className="text-[11px] font-extrabold text-emerald-950 uppercase tracking-wider border-b border-emerald-200/80 pb-1">
-                  Rekening Tujuan Pembayaran
+                  Informasi Penerima Dana & Rekening Tujuan
                 </div>
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                   <div>
@@ -1033,7 +1206,7 @@ export const FinanceManager: React.FC<FinanceManagerProps> = ({
 
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                   {destinationBank === 'Lainnya' && (
-                    <div>
+                    <div className="sm:col-span-2">
                       <label className="font-bold text-emerald-900 block mb-1">No. Rekening Tujuan (Input Manual)</label>
                       <input
                         type="text"
@@ -1044,8 +1217,8 @@ export const FinanceManager: React.FC<FinanceManagerProps> = ({
                       />
                     </div>
                   )}
-                  <div className={destinationBank === 'Lainnya' ? '' : 'sm:col-span-2'}>
-                    <label className="font-bold text-emerald-900 block mb-1">Nama Penerima / Pemilik Rekening (Input Manual)</label>
+                  <div>
+                    <label className="font-bold text-emerald-900 block mb-1">Nama Penerima / Pemilik Rekening</label>
                     <input
                       type="text"
                       placeholder="Contoh: PT Yusuf Property Indonesia"
@@ -1054,7 +1227,28 @@ export const FinanceManager: React.FC<FinanceManagerProps> = ({
                       className="w-full p-2 bg-white border border-emerald-200 rounded-lg font-medium text-slate-900"
                     />
                   </div>
+                  <div>
+                    <label className="font-bold text-emerald-900 block mb-1">Status / Peran Penerima Dana</label>
+                    <input
+                      type="text"
+                      placeholder="Contoh: Rekening Perusahaan / Supplier / Mandor"
+                      value={recipientRelationship}
+                      onChange={(e) => setRecipientRelationship(e.target.value)}
+                      className="w-full p-2 bg-white border border-emerald-200 rounded-lg font-medium text-slate-900"
+                    />
+                  </div>
                 </div>
+              </div>
+
+              <div>
+                <label className="font-bold text-slate-700 block mb-1">Catatan Tambahan Detail Transaksi (Opsional)</label>
+                <textarea
+                  rows={2}
+                  placeholder="Contoh: Bukti transfer telah dicek mutasi rekening koran BCA oleh Finance"
+                  value={transactionNotes}
+                  onChange={(e) => setTransactionNotes(e.target.value)}
+                  className="w-full p-2 bg-slate-50 border border-slate-200 rounded-lg font-medium text-slate-900"
+                />
               </div>
 
               {/* Opsi Backdate / Tanggal Mundur */}
@@ -1170,16 +1364,16 @@ export const FinanceManager: React.FC<FinanceManagerProps> = ({
 
               <div className="grid grid-cols-2 gap-3">
                 <div>
-                  <label className="font-bold text-slate-700 block mb-1">Pembayaran Atas Nama</label>
+                  <label className="font-bold text-slate-700 block mb-1">Proyek</label>
                   <input
                     type="text"
-                    value={editingRecord.payerName || ''}
-                    onChange={(e) => setEditingRecord({ ...editingRecord, payerName: e.target.value })}
+                    value={editingRecord.projectName}
+                    onChange={(e) => setEditingRecord({ ...editingRecord, projectName: e.target.value })}
                     className="w-full p-2 bg-slate-50 border border-slate-200 rounded-lg"
                   />
                 </div>
                 <div>
-                  <label className="font-bold text-slate-700 block mb-1">Proyek / Unit</label>
+                  <label className="font-bold text-slate-700 block mb-1">Blok / Unit</label>
                   <input
                     type="text"
                     value={editingRecord.unitCode || ''}
@@ -1189,26 +1383,61 @@ export const FinanceManager: React.FC<FinanceManagerProps> = ({
                 </div>
               </div>
 
-              <div className="grid grid-cols-2 gap-3 p-3 bg-amber-50/60 border border-amber-200/70 rounded-xl">
-                <div>
-                  <label className="font-bold text-amber-900 block mb-1">Sumber Pembayaran (Bank)</label>
-                  <input
-                    type="text"
-                    placeholder="Contoh: Bank BCA / Mandiri / Cash"
-                    value={editingRecord.sourceBank || ''}
-                    onChange={(e) => setEditingRecord({ ...editingRecord, sourceBank: e.target.value })}
-                    className="w-full p-2 bg-white border border-amber-200 rounded-lg"
-                  />
+              <div className="p-3 bg-amber-50/60 border border-amber-200/70 rounded-xl space-y-3">
+                <div className="text-[11px] font-extrabold text-amber-950 uppercase tracking-wider border-b border-amber-200/70 pb-1">
+                  Informasi Pengirim Dana
                 </div>
-                <div>
-                  <label className="font-bold text-amber-900 block mb-1">Nama Bank Pengirim</label>
-                  <input
-                    type="text"
-                    placeholder="Contoh: Bank BCA"
-                    value={editingRecord.senderBankName || ''}
-                    onChange={(e) => setEditingRecord({ ...editingRecord, senderBankName: e.target.value })}
-                    className="w-full p-2 bg-white border border-amber-200 rounded-lg"
-                  />
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="font-bold text-amber-900 block mb-1">Nama Pengirim / Atas Nama</label>
+                    <input
+                      type="text"
+                      value={editingRecord.payerName || ''}
+                      onChange={(e) => setEditingRecord({ ...editingRecord, payerName: e.target.value })}
+                      className="w-full p-2 bg-white border border-amber-200 rounded-lg"
+                    />
+                  </div>
+                  <div>
+                    <label className="font-bold text-amber-900 block mb-1">Hubungan Pengirim</label>
+                    <input
+                      type="text"
+                      value={editingRecord.payerRelationship || ''}
+                      onChange={(e) => setEditingRecord({ ...editingRecord, payerRelationship: e.target.value })}
+                      className="w-full p-2 bg-white border border-amber-200 rounded-lg"
+                    />
+                  </div>
+                </div>
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                  <div>
+                    <label className="font-bold text-amber-900 block mb-1">Sumber Pembayaran</label>
+                    <input
+                      type="text"
+                      placeholder="Bank BCA / Cash"
+                      value={editingRecord.sourceBank || ''}
+                      onChange={(e) => setEditingRecord({ ...editingRecord, sourceBank: e.target.value })}
+                      className="w-full p-2 bg-white border border-amber-200 rounded-lg"
+                    />
+                  </div>
+                  <div>
+                    <label className="font-bold text-amber-900 block mb-1">Nama Bank Pengirim</label>
+                    <input
+                      type="text"
+                      placeholder="Contoh: Bank BCA"
+                      value={editingRecord.senderBankName || ''}
+                      onChange={(e) => setEditingRecord({ ...editingRecord, senderBankName: e.target.value })}
+                      className="w-full p-2 bg-white border border-amber-200 rounded-lg"
+                    />
+                  </div>
+                  <div>
+                    <label className="font-bold text-amber-900 block mb-1">No. Rekening Pengirim</label>
+                    <input
+                      type="text"
+                      placeholder="No. Rek Pengirim"
+                      value={editingRecord.senderAccountNumber || ''}
+                      onChange={(e) => setEditingRecord({ ...editingRecord, senderAccountNumber: e.target.value })}
+                      className="w-full p-2 bg-white border border-amber-200 rounded-lg font-mono"
+                    />
+                  </div>
                 </div>
               </div>
 
@@ -1301,16 +1530,38 @@ export const FinanceManager: React.FC<FinanceManagerProps> = ({
                       />
                     </div>
                   )}
-                <div>
-                  <label className="font-bold text-emerald-900 block mb-1">Nama Penerima / Pemilik Rekening (Manual)</label>
-                  <input
-                    type="text"
-                    placeholder="Nama Pemilik Rekening Tujuan"
-                    value={editingRecord.destinationAccountName || ''}
-                    onChange={(e) => setEditingRecord({ ...editingRecord, destinationAccountName: e.target.value })}
-                    className="w-full p-2 bg-white border border-emerald-200 rounded-lg"
-                  />
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div>
+                    <label className="font-bold text-emerald-900 block mb-1">Nama Penerima / Pemilik Rekening (Manual)</label>
+                    <input
+                      type="text"
+                      placeholder="Nama Pemilik Rekening Tujuan"
+                      value={editingRecord.destinationAccountName || ''}
+                      onChange={(e) => setEditingRecord({ ...editingRecord, destinationAccountName: e.target.value })}
+                      className="w-full p-2 bg-white border border-emerald-200 rounded-lg"
+                    />
+                  </div>
+                  <div>
+                    <label className="font-bold text-emerald-900 block mb-1">Status / Peran Penerima Dana</label>
+                    <input
+                      type="text"
+                      placeholder="Contoh: Rekening Perusahaan / Supplier"
+                      value={editingRecord.recipientRelationship || ''}
+                      onChange={(e) => setEditingRecord({ ...editingRecord, recipientRelationship: e.target.value })}
+                      className="w-full p-2 bg-white border border-emerald-200 rounded-lg"
+                    />
+                  </div>
                 </div>
+              </div>
+
+              <div>
+                <label className="font-bold text-slate-700 block mb-1">Catatan Detail Transaksi</label>
+                <textarea
+                  rows={2}
+                  value={editingRecord.transactionNotes || ''}
+                  onChange={(e) => setEditingRecord({ ...editingRecord, transactionNotes: e.target.value })}
+                  className="w-full p-2 bg-slate-50 border border-slate-200 rounded-lg"
+                />
               </div>
 
               {/* Pengaturan Tanggal & Opsi Backdate Edit */}
@@ -1622,6 +1873,301 @@ export const FinanceManager: React.FC<FinanceManagerProps> = ({
               <button
                 onClick={() => setAuditRecord(null)}
                 className="px-4 py-2 bg-slate-900 text-white font-bold rounded-xl text-xs"
+              >
+                Tutup
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Modal 5: Tampilan Detail Catatan Transaksi (Pengirim & Penerima Dana) */}
+      {activeDetailRecord && (
+        <div className="fixed inset-0 z-50 bg-slate-950/75 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl shadow-2xl max-w-2xl w-full border border-slate-200 overflow-hidden max-h-[90vh] flex flex-col">
+            {/* Modal Header */}
+            <div className="bg-slate-900 p-4 text-white flex justify-between items-start gap-3 shrink-0">
+              <div className="space-y-1">
+                <div className="flex items-center gap-2 flex-wrap">
+                  <span className="font-bold text-sm flex items-center gap-2">
+                    <FileText className="w-4 h-4 text-amber-400" />
+                    Detail Catatan Transaksi Keuangan
+                  </span>
+                  <span
+                    className={`px-2 py-0.5 rounded-full text-[10px] font-black uppercase ${
+                      activeDetailRecord.type === 'income'
+                        ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40'
+                        : 'bg-rose-500/20 text-rose-300 border border-rose-500/40'
+                    }`}
+                  >
+                    {activeDetailRecord.type === 'income' ? 'Cash In (Pemasukan)' : 'Cash Out (Pengeluaran)'}
+                  </span>
+                  {activeDetailRecord.isBackdate && (
+                    <span className="px-2 py-0.5 rounded-full text-[10px] font-black bg-purple-500/20 text-purple-200 border border-purple-400/40">
+                      BACKDATE
+                    </span>
+                  )}
+                  {activeDetailRecord.isDeleted && (
+                    <span className="px-2 py-0.5 rounded-full text-[10px] font-black bg-rose-600 text-white">
+                      DIHAPUS
+                    </span>
+                  )}
+                </div>
+                <p className="text-[11px] text-slate-400 font-mono">
+                  Ref: {activeDetailRecord.refNumber} • Tanggal: {formatDate(activeDetailRecord.date)}
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setDetailRecord(null)}
+                className="text-slate-400 hover:text-white p-1 rounded-lg hover:bg-slate-800 cursor-pointer"
+                title="Tutup"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            {/* Modal Body */}
+            <div className="p-5 space-y-4 text-xs overflow-y-auto">
+              {/* Amount & Main Description Card */}
+              <div className="p-4 rounded-2xl bg-slate-50 border border-slate-200 space-y-3">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-slate-200 pb-3">
+                  <div>
+                    <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400 block">
+                      Nominal Transaksi
+                    </span>
+                    <div
+                      className={`text-2xl font-black tracking-tight ${
+                        activeDetailRecord.isDeleted
+                          ? 'text-slate-400 line-through'
+                          : activeDetailRecord.type === 'income'
+                          ? 'text-emerald-700'
+                          : 'text-rose-700'
+                      }`}
+                    >
+                      {activeDetailRecord.type === 'income' ? '+' : '-'}
+                      {formatRupiah(activeDetailRecord.amount)}
+                    </div>
+                  </div>
+                  <div className="sm:text-right space-y-1">
+                    <span className="inline-block px-2.5 py-1 rounded-lg bg-slate-900 text-amber-400 font-bold text-[10px]">
+                      {CATEGORY_LABELS[activeDetailRecord.category] || activeDetailRecord.category}
+                    </span>
+                    <div className="text-[11px] text-slate-500">
+                      Metode: <strong className="text-slate-800">{activeDetailRecord.paymentMethod}</strong>
+                    </div>
+                  </div>
+                </div>
+
+                <div>
+                  <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400 block mb-0.5">
+                    Keterangan / Uraian Transaksi
+                  </span>
+                  <p className="font-bold text-slate-900 text-sm leading-snug">{activeDetailRecord.title}</p>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5 pt-1">
+                  <div className="p-2.5 bg-white rounded-xl border border-slate-200/80">
+                    <span className="text-[10px] text-slate-400 font-semibold block">Proyek Perumahan</span>
+                    <span className="font-bold text-slate-800">{activeDetailRecord.projectName || '-'}</span>
+                  </div>
+                  <div className="p-2.5 bg-white rounded-xl border border-slate-200/80">
+                    <span className="text-[10px] text-slate-400 font-semibold block">Blok / Unit Kavling</span>
+                    <span className="font-bold text-amber-700">
+                      {activeDetailRecord.unitCode ? `Blok ${activeDetailRecord.unitCode}` : '-'}
+                    </span>
+                  </div>
+                  <div className="p-2.5 bg-white rounded-xl border border-slate-200/80">
+                    <span className="text-[10px] text-slate-400 font-semibold block">Petugas Pencatat</span>
+                    <span className="font-bold text-slate-800">{activeDetailRecord.recordedBy || '-'}</span>
+                  </div>
+                </div>
+
+                {activeDetailRecord.transactionNotes && (
+                  <div className="p-2.5 bg-white rounded-xl border border-slate-200/80">
+                    <span className="text-[10px] text-slate-400 font-semibold block">Catatan Tambahan</span>
+                    <p className="text-slate-700 mt-0.5">{activeDetailRecord.transactionNotes}</p>
+                  </div>
+                )}
+
+                {activeDetailRecord.isBackdate && (
+                  <div className="p-2.5 bg-purple-50 border border-purple-200 rounded-xl text-purple-900 space-y-0.5">
+                    <div className="font-extrabold flex items-center gap-1.5">
+                      <Calendar className="w-3.5 h-3.5 text-purple-700" />
+                      <span>Transaksi Backdate (Tanggal Efektif: {formatDate(activeDetailRecord.backdateDate || activeDetailRecord.date)})</span>
+                    </div>
+                    {activeDetailRecord.backdateReason && (
+                      <p className="text-[11px] text-purple-800">
+                        Alasan Backdate: &quot;{activeDetailRecord.backdateReason}&quot;
+                      </p>
+                    )}
+                  </div>
+                )}
+
+                {activeDetailRecord.isDeleted && (
+                  <div className="p-2.5 bg-rose-50 border border-rose-200 rounded-xl text-rose-900 space-y-0.5">
+                    <div className="font-extrabold flex items-center gap-1.5">
+                      <ShieldAlert className="w-3.5 h-3.5 text-rose-600" />
+                      <span>Transaksi Ini Berstatus Dihapus</span>
+                    </div>
+                    <p className="text-[11px]">
+                      Alasan: &quot;{activeDetailRecord.deleteReason || '-'}&quot; • Oleh: {activeDetailRecord.deletedBy || '-'} ({activeDetailRecord.deletedAt || '-'})
+                    </p>
+                  </div>
+                )}
+              </div>
+
+              {/* Sender & Receiver Cards */}
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                {/* Card 1: Informasi Pengirim Dana */}
+                <div className="p-4 rounded-2xl bg-amber-50/70 border border-amber-200 space-y-3">
+                  <div className="flex items-center gap-2 border-b border-amber-200 pb-2">
+                    <div className="p-1.5 bg-amber-500/20 text-amber-800 rounded-lg">
+                      <Landmark className="w-4 h-4" />
+                    </div>
+                    <div>
+                      <h4 className="font-black text-amber-950 text-xs uppercase tracking-wider">
+                        Informasi Pengirim Dana
+                      </h4>
+                      <p className="text-[10px] text-amber-800">Sumber asal pembayaran / transfer</p>
+                    </div>
+                  </div>
+
+                  <div className="space-y-2 text-xs">
+                    <div>
+                      <span className="text-[10px] font-bold text-amber-800/80 block">Nama Pengirim / Pemilik Rekening</span>
+                      <span className="font-extrabold text-slate-900">
+                        {activeDetailRecord.payerName ||
+                          (activeDetailRecord.type === 'expense' ? 'PT Yusuf Property Indonesia' : '-')}
+                      </span>
+                    </div>
+                    <div>
+                      <span className="text-[10px] font-bold text-amber-800/80 block">Hubungan / Status Pengirim</span>
+                      <span className="font-semibold text-slate-800">
+                        {activeDetailRecord.payerRelationship ||
+                          (activeDetailRecord.type === 'expense' ? 'Perusahaan / PT' : '-')}
+                      </span>
+                    </div>
+                    <div>
+                      <span className="text-[10px] font-bold text-amber-800/80 block">Bank / Sumber Pengirim</span>
+                      <span className="font-bold text-slate-900">
+                        {activeDetailRecord.senderBankName || activeDetailRecord.sourceBank || activeDetailRecord.paymentMethod || '-'}
+                      </span>
+                    </div>
+                    <div>
+                      <span className="text-[10px] font-bold text-amber-800/80 block">No. Rekening Pengirim</span>
+                      <span className="font-mono font-bold text-slate-900 bg-white px-2 py-1 rounded-lg border border-amber-200 inline-block mt-0.5">
+                        {activeDetailRecord.senderAccountNumber || '-'}
+                      </span>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Card 2: Informasi Penerima Dana */}
+                <div className="p-4 rounded-2xl bg-emerald-50/70 border border-emerald-200 space-y-3">
+                  <div className="flex items-center gap-2 border-b border-emerald-200 pb-2">
+                    <div className="p-1.5 bg-emerald-500/20 text-emerald-800 rounded-lg">
+                      <CreditCard className="w-4 h-4" />
+                    </div>
+                    <div>
+                      <h4 className="font-black text-emerald-950 text-xs uppercase tracking-wider">
+                        Informasi Penerima Dana
+                      </h4>
+                      <p className="text-[10px] text-emerald-800">Tujuan dana masuk / rekening penerima</p>
+                    </div>
+                  </div>
+
+                  <div className="space-y-2 text-xs">
+                    <div>
+                      <span className="text-[10px] font-bold text-emerald-800/80 block">Nama Penerima / Pemilik Rekening</span>
+                      <span className="font-extrabold text-emerald-950">
+                        {activeDetailRecord.destinationAccountName ||
+                          (activeDetailRecord.type === 'income' ? 'PT Yusuf Property Indonesia (Kas Perusahaan)' : '-')}
+                      </span>
+                    </div>
+                    <div>
+                      <span className="text-[10px] font-bold text-emerald-800/80 block">Status / Peran Penerima</span>
+                      <span className="font-semibold text-emerald-900">
+                        {activeDetailRecord.recipientRelationship ||
+                          (activeDetailRecord.type === 'income'
+                            ? 'Rekening Perusahaan (PT Yusuf Property)'
+                            : 'Vendor / Mandor / Penerima Dana')}
+                      </span>
+                    </div>
+                    <div>
+                      <span className="text-[10px] font-bold text-emerald-800/80 block">Bank Penerima (Rekening Tujuan)</span>
+                      <span className="font-bold text-emerald-950">
+                        {activeDetailRecord.destinationBank || '-'}
+                      </span>
+                    </div>
+                    <div>
+                      <span className="text-[10px] font-bold text-emerald-800/80 block">No. Rekening Tujuan</span>
+                      <span className="font-mono font-bold text-emerald-950 bg-white px-2 py-1 rounded-lg border border-emerald-200 inline-block mt-0.5">
+                        {activeDetailRecord.destinationAccountNumber || '-'}
+                      </span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              {/* Latest Audit Preview */}
+              {activeDetailRecord.auditLogs && activeDetailRecord.auditLogs.length > 0 && (
+                <div className="p-3 bg-slate-50 border border-slate-200 rounded-xl flex items-center justify-between gap-3 flex-wrap">
+                  <div className="text-[11px] text-slate-600">
+                    <span className="font-bold text-slate-900">Aktivitas Audit Terakhir:</span>{' '}
+                    {activeDetailRecord.auditLogs[activeDetailRecord.auditLogs.length - 1].action} oleh{' '}
+                    <strong>{activeDetailRecord.auditLogs[activeDetailRecord.auditLogs.length - 1].user}</strong>{' '}
+                    ({activeDetailRecord.auditLogs[activeDetailRecord.auditLogs.length - 1].timestamp})
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const rec = activeDetailRecord;
+                      setDetailRecord(null);
+                      setAuditRecord(rec);
+                    }}
+                    className="text-[11px] font-extrabold text-amber-700 hover:text-amber-900 underline cursor-pointer"
+                  >
+                    Lihat Semua Audit ({activeDetailRecord.auditLogs.length})
+                  </button>
+                </div>
+              )}
+            </div>
+
+            {/* Modal Footer */}
+            <div className="p-3.5 bg-slate-50 border-t border-slate-200 flex items-center justify-between gap-2 shrink-0">
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    const rec = activeDetailRecord;
+                    setDetailRecord(null);
+                    setAuditRecord(rec);
+                  }}
+                  className="px-3 py-2 bg-white hover:bg-slate-100 border border-slate-200 text-slate-700 font-bold rounded-xl text-xs flex items-center gap-1.5 cursor-pointer"
+                >
+                  <History className="w-3.5 h-3.5" />
+                  <span>Audit History</span>
+                </button>
+                {!activeDetailRecord.isDeleted && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const rec = activeDetailRecord;
+                      setDetailRecord(null);
+                      handleOpenEdit(rec);
+                    }}
+                    className="px-3 py-2 bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold rounded-xl text-xs flex items-center gap-1.5 cursor-pointer"
+                  >
+                    <Edit3 className="w-3.5 h-3.5" />
+                    <span>Edit Transaksi</span>
+                  </button>
+                )}
+              </div>
+              <button
+                type="button"
+                onClick={() => setDetailRecord(null)}
+                className="px-4 py-2 bg-slate-900 hover:bg-slate-800 text-white font-bold rounded-xl text-xs cursor-pointer"
               >
                 Tutup
               </button>

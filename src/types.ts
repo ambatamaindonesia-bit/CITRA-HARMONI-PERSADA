@@ -235,11 +235,14 @@ export interface FinancialRecord {
   paymentMethod: string;
   sourceBank?: string;
   senderBankName?: string;
+  senderAccountNumber?: string;
   destinationBank?: string;
   destinationAccountNumber?: string;
   destinationAccountName?: string;
   payerName?: string;
   payerRelationship?: string;
+  recipientRelationship?: string;
+  transactionNotes?: string;
   refNumber: string;
   recordedBy: string;
   isDeleted?: boolean;

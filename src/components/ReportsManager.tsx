@@ -501,14 +501,17 @@ export const ReportsManager: React.FC<ReportsManagerProps> = ({
                     <td className="p-3 text-slate-700">{f.payerName || '-'}</td>
                     <td className="p-3">
                       <div className="font-semibold text-slate-800">{f.paymentMethod}</div>
-                      {(f.sourceBank || f.senderBankName) && (
+                      {(f.sourceBank || f.senderBankName || f.senderAccountNumber) && (
                         <div className="text-[10px] text-slate-500">
-                          Bank Pengirim: <strong>{f.senderBankName || f.sourceBank}</strong>
+                          Pengirim:{' '}
+                          <strong>
+                            {[f.senderBankName || f.sourceBank, f.senderAccountNumber].filter(Boolean).join(' • ')}
+                          </strong>
                         </div>
                       )}
                       {(f.destinationBank || f.destinationAccountNumber || f.destinationAccountName) && (
                         <div className="text-[10px] text-emerald-700">
-                          Tujuan:{' '}
+                          Penerima:{' '}
                           <strong>
                             {[f.destinationBank, f.destinationAccountNumber].filter(Boolean).join(' - ') || '-'}
                           </strong>

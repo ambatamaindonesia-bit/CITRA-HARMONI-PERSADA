@@ -156,12 +156,28 @@ export default function App() {
 
   // Database Initialized Flag
   const [isDbLoaded, setIsDbLoaded] = useState<boolean>(false);
+  const [syncGeneration, setSyncGeneration] = useState<number>(0);
   const [showDatabaseSyncModal, setShowDatabaseSyncModal] = useState<boolean>(false);
   const [syncNotice, setSyncNotice] = useState<{ id: string; message: string } | null>(null);
 
   // Refs to prevent echo loops between Cloud/Broadcast updates and local persistence effects
   const lastRemoteJsonRef = useRef<Record<string, string>>({});
   const skipCloudWriteJsonRef = useRef<Record<string, string>>({});
+
+  const DATA_SYNC_LABELS: Record<string, string> = {
+    yp_erp_users: 'Data User & Akses ERP diperbarui',
+    yp_erp_projects: 'Data Proyek Perumahan diperbarui',
+    yp_erp_units: 'Stok Unit & Site Plan diperbarui',
+    yp_erp_sales: 'Data Penjualan & SPR/KPR diperbarui',
+    yp_erp_construction: 'Progress Konstruksi & Mandor diperbarui',
+    yp_erp_finances: 'Jurnal Transaksi Keuangan & Saldo diperbarui',
+    yp_erp_customers: 'Data Konsumen & Berkas KPR diperbarui',
+    yp_erp_materials: 'Stok Material Konstruksi diperbarui',
+    yp_erp_material_usages: 'Pemakaian Material Proyek diperbarui',
+    yp_erp_progress_docs: 'Dokumentasi Progress Lapangan diperbarui',
+    yp_erp_attendance: 'Data Absensi Karyawan diperbarui',
+    yp_erp_prospects: 'Database Prospek (Leads) diperbarui',
+  };
 
   useEffect(() => {
     if (!syncNotice) return;
@@ -193,11 +209,11 @@ export default function App() {
       console.warn(`localStorage set failed for ${key}:`, e);
     }
 
-    if (key === 'yp_erp_finances') {
-      const actor = meta?.updatedBy || meta?.senderUser;
-      const detail = meta?.actionDetail || 'Jurnal transaksi keuangan & saldo diperbarui';
+    const actor = meta?.updatedBy || meta?.senderUser;
+    const detail = meta?.actionDetail || DATA_SYNC_LABELS[key];
+    if (detail) {
       setSyncNotice({
-        id: `${Date.now()}`,
+        id: `${Date.now()}-${key}`,
         message: actor ? `${detail} (oleh ${actor})` : detail,
       });
     }
@@ -417,6 +433,7 @@ export default function App() {
     } catch (e) {
       console.error('Error loading data from Cloud/IndexedDB:', e);
     } finally {
+      setSyncGeneration((prev) => prev + 1);
       setIsDbLoaded(true);
     }
   };
@@ -471,7 +488,7 @@ export default function App() {
     return () => {
       unsubs.forEach((unsub) => unsub && unsub());
     };
-  }, [isDbLoaded]);
+  }, [isDbLoaded, syncGeneration]);
 
   // Real-time synchronization of currentUser permissions/menus whenever users array updates
   useEffect(() => {
@@ -483,7 +500,10 @@ export default function App() {
 
     if (matchedUser) {
       if (matchedUser.status === 'Nonaktif') {
-        alert(`Akun (${matchedUser.name}) telah dinonaktifkan oleh Administrator.`);
+        setSyncNotice({
+          id: `${Date.now()}-disabled`,
+          message: `Akun (${matchedUser.name}) telah dinonaktifkan oleh Administrator.`,
+        });
         setCurrentUser(null);
         return;
       }
@@ -494,7 +514,7 @@ export default function App() {
         setCurrentUser(matchedUser);
       }
     }
-  }, [users]);
+  }, [users, currentUser]);
 
   // Active Tab security protection (redirect if active tab is no longer permitted)
   const currentAllowedTabs = getUserAllowedTabs(currentUser);
@@ -602,7 +622,10 @@ export default function App() {
     if (alsoSaveSupabaseUsers && Array.isArray(data)) {
       saveUsersToSupabase(data);
     }
-    saveToCloud(key, data, false, { updatedBy: currentUser?.name });
+    saveToCloud(key, data, true, {
+      updatedBy: currentUser?.name,
+      actionDetail: DATA_SYNC_LABELS[key],
+    });
     broadcastDataUpdate(key, data, currentUser?.name);
   };
 
@@ -1010,42 +1033,22 @@ export default function App() {
     setSales([]);
     setConstruction([]);
     setFinances([]);
-    localStorage.setItem('yp_erp_projects', JSON.stringify([]));
-    localStorage.setItem('yp_erp_units', JSON.stringify([]));
-    localStorage.setItem('yp_erp_sales', JSON.stringify([]));
-    localStorage.setItem('yp_erp_construction', JSON.stringify([]));
-    localStorage.setItem('yp_erp_finances', JSON.stringify([]));
   };
 
-  // User Management Handlers (Persisted to Supabase users table & Cloud Firestore)
+  // User Management Handlers (Persisted via persistLocalMutation -> Supabase users table & Cloud Firestore)
   const handleAddUser = (newUser: AppUser) => {
-    setUsers((prev) => {
-      const updated = [newUser, ...prev.filter((u) => u.id !== newUser.id)];
-      saveUsersToSupabase(updated);
-      saveToCloud('yp_erp_users', updated, true);
-      return updated;
-    });
+    setUsers((prev) => [newUser, ...prev.filter((u) => u.id !== newUser.id)]);
   };
 
   const handleUpdateUser = (updatedUser: AppUser) => {
-    setUsers((prev) => {
-      const updated = prev.map((u) => (u.id === updatedUser.id ? updatedUser : u));
-      saveUsersToSupabase(updated);
-      saveToCloud('yp_erp_users', updated, true);
-      return updated;
-    });
+    setUsers((prev) => prev.map((u) => (u.id === updatedUser.id ? updatedUser : u)));
     if (currentUser && currentUser.id === updatedUser.id) {
       setCurrentUser(updatedUser);
     }
   };
 
   const handleDeleteUser = (userId: string) => {
-    setUsers((prev) => {
-      const updated = prev.filter((u) => u.id !== userId);
-      saveUsersToSupabase(updated);
-      saveToCloud('yp_erp_users', updated, true);
-      return updated;
-    });
+    setUsers((prev) => prev.filter((u) => u.id !== userId));
   };
 
   // Project Management Handlers
@@ -1067,7 +1070,7 @@ export default function App() {
 
   // Transaction Handlers
   const handleCreateTransaction = (newSales: SalesTransaction) => {
-    setSales([newSales, ...sales]);
+    setSales((prev) => [newSales, ...prev]);
 
     setUnits((prevUnits) =>
       prevUnits.map((u) => {
@@ -1281,14 +1284,6 @@ export default function App() {
       actionDetail: `Transaksi baru "${record.title}" (${formatRupiah(record.amount)}) dicatat`,
     });
   };
-
-  // Active tab permission auto-guard
-  const userAllowedTabs = getUserAllowedTabs(currentUser);
-  useEffect(() => {
-    if (currentUser && !userAllowedTabs.includes(activeTab)) {
-      setActiveTab(userAllowedTabs[0] || 'dashboard');
-    }
-  }, [currentUser, activeTab, userAllowedTabs]);
 
   // Database Loading Splash Screen
   if (!isDbLoaded) {
