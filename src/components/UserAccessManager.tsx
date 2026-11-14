@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
-import { AppUser, UserRole, MarketingType, TabType, ALL_TAB_ITEMS, DEFAULT_ROLE_TABS, getUserAllowedTabs } from '../types';
+import { AppUser, UserRole, MarketingType, TabType, ALL_TAB_ITEMS, DEFAULT_ROLE_TABS, getUserAllowedTabs, isUserLiveSyncEnabled } from '../types';
+import type { LiveOnlineUser } from '../utils/liveSync';
 import {
   ShieldCheck,
   UserPlus,
@@ -15,26 +16,37 @@ import {
   EyeOff,
   UserCheck,
   Check,
+  Radio,
+  Wifi,
+  WifiOff,
+  RefreshCw,
 } from 'lucide-react';
 
 interface UserAccessManagerProps {
   users: AppUser[];
   currentUser: AppUser | null;
+  onlineUsers?: LiveOnlineUser[];
   onAddUser: (user: AppUser) => void;
   onUpdateUser: (user: AppUser) => void;
   onDeleteUser: (userId: string) => void;
+  onBulkUpdateUsers?: (users: AppUser[]) => void;
+  onPublishAllToLive?: () => Promise<boolean>;
 }
 
 export const UserAccessManager: React.FC<UserAccessManagerProps> = ({
   users,
   currentUser,
+  onlineUsers = [],
   onAddUser,
   onUpdateUser,
   onDeleteUser,
+  onBulkUpdateUsers,
+  onPublishAllToLive,
 }) => {
   const [searchTerm, setSearchTerm] = useState('');
   const [roleFilter, setRoleFilter] = useState<string>('ALL');
   const [statusFilter, setStatusFilter] = useState<string>('ALL');
+  const [isPublishingLive, setIsPublishingLive] = useState(false);
 
   // Modals
   const [showAddModal, setShowAddModal] = useState(false);
@@ -56,6 +68,7 @@ export const UserAccessManager: React.FC<UserAccessManagerProps> = ({
   const [status, setStatus] = useState<'Aktif' | 'Nonaktif'>('Aktif');
   const [notes, setNotes] = useState('');
   const [allowedTabs, setAllowedTabs] = useState<TabType[]>(DEFAULT_ROLE_TABS['Sales Marketing']);
+  const [liveSyncEnabled, setLiveSyncEnabled] = useState<boolean>(true);
 
   // Admin Security Check
   if (currentUser?.role !== 'Super Admin') {
@@ -80,6 +93,7 @@ export const UserAccessManager: React.FC<UserAccessManagerProps> = ({
   // Stats
   const totalUsers = users.length;
   const activeUsers = users.filter((u) => u.status === 'Aktif').length;
+  const liveSelectedUsers = users.filter((u) => isUserLiveSyncEnabled(u)).length;
   const inactiveUsers = users.filter((u) => u.status === 'Nonaktif').length;
   const adminUsers = users.filter((u) => u.role === 'Super Admin').length;
 
@@ -112,6 +126,7 @@ export const UserAccessManager: React.FC<UserAccessManagerProps> = ({
     setStatus('Aktif');
     setNotes('');
     setAllowedTabs(DEFAULT_ROLE_TABS['Sales Marketing']);
+    setLiveSyncEnabled(true);
     setFormError(null);
   };
 
@@ -119,6 +134,9 @@ export const UserAccessManager: React.FC<UserAccessManagerProps> = ({
     setRole(newRole);
     const defaults = DEFAULT_ROLE_TABS[newRole] || DEFAULT_ROLE_TABS['Sales Marketing'];
     setAllowedTabs(defaults);
+    if (newRole === 'Super Admin') {
+      setLiveSyncEnabled(true);
+    }
   };
 
   const handleToggleTab = (tabId: TabType) => {
@@ -152,6 +170,7 @@ export const UserAccessManager: React.FC<UserAccessManagerProps> = ({
     setStatus(u.status);
     setNotes(u.notes || '');
     setAllowedTabs(getUserAllowedTabs(u));
+    setLiveSyncEnabled(u.liveSyncEnabled !== false);
   };
 
   const handleToggleStatus = (u: AppUser) => {
@@ -160,6 +179,44 @@ export const UserAccessManager: React.FC<UserAccessManagerProps> = ({
       ...u,
       status: updatedStatus,
     });
+  };
+
+  const handleToggleLiveSync = (u: AppUser) => {
+    if (u.role === 'Super Admin') return;
+    const nextLive = u.liveSyncEnabled === false ? true : false;
+    onUpdateUser({
+      ...u,
+      liveSyncEnabled: nextLive,
+    });
+    setFormSuccess(
+      nextLive
+        ? `✓ User "${u.name}" (@${u.username}) sekarang TERHUBUNG Live Multi-Perangkat.`
+        : `⏸ Koneksi Live untuk "${u.name}" (@${u.username}) dinonaktifkan sementara (hanya lokal).`
+    );
+  };
+
+  const handleConnectAllActiveLive = () => {
+    if (!onBulkUpdateUsers) return;
+    const nextUsers = users.map((u) =>
+      u.status === 'Aktif' ? { ...u, liveSyncEnabled: true } : u
+    );
+    onBulkUpdateUsers(nextUsers);
+    setFormSuccess('✓ Seluruh user berstatus Aktif berhasil dihubungkan ke Live Sync Multi-Perangkat.');
+  };
+
+  const handlePublishLiveNow = async () => {
+    if (!onPublishAllToLive) return;
+    setIsPublishingLive(true);
+    try {
+      const ok = await onPublishAllToLive();
+      if (ok) {
+        setFormSuccess('✓ Seluruh data ERP & daftar user terbaru berhasil dipublikasikan Live ke semua perangkat terhubung!');
+      } else {
+        setFormError('Gagal mempublikasikan data ke Live Server. Pastikan koneksi internet aktif.');
+      }
+    } finally {
+      setIsPublishingLive(false);
+    }
   };
 
   const handleSaveUser = (e: React.FormEvent) => {
@@ -207,6 +264,8 @@ export const UserAccessManager: React.FC<UserAccessManagerProps> = ({
       ? allowedTabs 
       : allowedTabs.filter((t) => t !== 'user_access');
 
+    const finalLiveSync = role === 'Super Admin' ? true : liveSyncEnabled;
+
     if (editingUser) {
       const updated: AppUser = {
         ...editingUser,
@@ -221,10 +280,11 @@ export const UserAccessManager: React.FC<UserAccessManagerProps> = ({
         status,
         notes: notes.trim(),
         allowedTabs: finalAllowedTabs,
+        liveSyncEnabled: finalLiveSync,
       };
       onUpdateUser(updated);
       setEditingUser(null);
-      setFormSuccess(`✓ Hak akses user "${cleanName}" (@${cleanUsername}) berhasil diperbarui dan disinkronkan ke Supabase & Cloud Database.`);
+      setFormSuccess(`✓ Hak akses & koneksi Live user "${cleanName}" (@${cleanUsername}) berhasil diperbarui ke semua perangkat.`);
     } else {
       const newUser: AppUser = {
         id: `usr-${Date.now()}`,
@@ -239,10 +299,11 @@ export const UserAccessManager: React.FC<UserAccessManagerProps> = ({
         status,
         notes: notes.trim(),
         allowedTabs: finalAllowedTabs,
+        liveSyncEnabled: finalLiveSync,
       };
       onAddUser(newUser);
       setShowAddModal(false);
-      setFormSuccess(`✓ User baru "${cleanName}" (@${cleanUsername}) berhasil ditambahkan dan disinkronkan ke Supabase & Cloud Database!`);
+      setFormSuccess(`✓ User baru "${cleanName}" (@${cleanUsername}) berhasil ditambahkan dan siap login live di perangkat lain!`);
     }
     resetForm();
   };
@@ -292,6 +353,47 @@ export const UserAccessManager: React.FC<UserAccessManagerProps> = ({
         </button>
       </div>
 
+      {/* Live Multi-Device Hub Banner */}
+      <div className="bg-emerald-950 text-white p-4 sm:p-5 rounded-2xl border border-emerald-700/70 shadow-md flex flex-col lg:flex-row lg:items-center justify-between gap-4">
+        <div className="space-y-1">
+          <div className="flex items-center gap-2 flex-wrap">
+            <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 text-[10px] font-black">
+              <Radio className="w-3.5 h-3.5 animate-pulse" /> LIVE MULTI-DEVICE SERVER AKTIF
+            </span>
+            <span className="text-[11px] text-emerald-200 font-bold">
+              {liveSelectedUsers} User Terhubung Live • {onlineUsers.length} User Online Sekarang
+            </span>
+          </div>
+          <p className="text-xs text-emerald-100/90 leading-relaxed">
+            Pilih user mana saja di tabel bawah pada kolom <strong>Koneksi Live</strong> agar setiap input data (prospek, transaksi, keuangan, unit) langsung sinkron otomatis antar perangkat yang dipilih Admin.
+          </p>
+        </div>
+
+        <div className="flex flex-wrap items-center gap-2 flex-shrink-0">
+          {onBulkUpdateUsers && (
+            <button
+              type="button"
+              onClick={handleConnectAllActiveLive}
+              className="px-3.5 py-2 bg-emerald-700 hover:bg-emerald-600 text-white font-bold text-xs rounded-xl border border-emerald-500/50 flex items-center gap-1.5 transition-colors cursor-pointer"
+            >
+              <Wifi className="w-3.5 h-3.5" />
+              <span>Hubungkan Semua Aktif</span>
+            </button>
+          )}
+          {onPublishAllToLive && (
+            <button
+              type="button"
+              disabled={isPublishingLive}
+              onClick={handlePublishLiveNow}
+              className="px-4 py-2 bg-amber-400 hover:bg-amber-300 text-slate-950 font-black text-xs rounded-xl shadow flex items-center gap-1.5 transition-colors cursor-pointer disabled:opacity-60"
+            >
+              <RefreshCw className={`w-3.5 h-3.5 ${isPublishingLive ? 'animate-spin' : ''}`} />
+              <span>{isPublishingLive ? 'Mempublikasikan...' : 'Push Live ke Semua Perangkat'}</span>
+            </button>
+          )}
+        </div>
+      </div>
+
       {/* Summary KPI Cards */}
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
         <div className="p-4 bg-white rounded-2xl border border-slate-200 shadow-sm flex items-center justify-between">
@@ -306,12 +408,12 @@ export const UserAccessManager: React.FC<UserAccessManagerProps> = ({
 
         <div className="p-4 bg-emerald-50 rounded-2xl border border-emerald-200 shadow-sm flex items-center justify-between">
           <div>
-            <span className="text-[10px] font-bold uppercase text-emerald-700 block">Akses Aktif</span>
-            <span className="text-2xl font-black text-emerald-900">{activeUsers} User</span>
-            <span className="text-[10px] text-emerald-600 font-medium block">Dapat Login Ke Sistem</span>
+            <span className="text-[10px] font-bold uppercase text-emerald-700 block">Akses Aktif & Live</span>
+            <span className="text-2xl font-black text-emerald-900">{liveSelectedUsers} / {activeUsers}</span>
+            <span className="text-[10px] text-emerald-600 font-medium block">Terhubung Antar Perangkat</span>
           </div>
           <div className="p-2 bg-emerald-200/60 text-emerald-800 rounded-xl">
-            <CheckCircle2 className="w-5 h-5" />
+            <Wifi className="w-5 h-5" />
           </div>
         </div>
 
@@ -328,12 +430,12 @@ export const UserAccessManager: React.FC<UserAccessManagerProps> = ({
 
         <div className="p-4 bg-indigo-50 rounded-2xl border border-indigo-200 shadow-sm flex items-center justify-between">
           <div>
-            <span className="text-[10px] font-bold uppercase text-indigo-700 block">Super Admin</span>
-            <span className="text-2xl font-black text-indigo-900">{adminUsers} User</span>
-            <span className="text-[10px] text-indigo-600 font-medium block">Otoritas Penuh</span>
+            <span className="text-[10px] font-bold uppercase text-indigo-700 block">Online Live Saat Ini</span>
+            <span className="text-2xl font-black text-indigo-900">{onlineUsers.length} User</span>
+            <span className="text-[10px] text-indigo-600 font-medium block">Perangkat Aktif ({adminUsers} Admin)</span>
           </div>
           <div className="p-2 bg-indigo-200/60 text-indigo-800 rounded-xl">
-            <KeyRound className="w-5 h-5" />
+            <Radio className="w-5 h-5" />
           </div>
         </div>
       </div>
@@ -406,6 +508,7 @@ export const UserAccessManager: React.FC<UserAccessManagerProps> = ({
                   <th className="p-3.5">Username Login</th>
                   <th className="p-3.5">Role Otorisasi ERP</th>
                   <th className="p-3.5">Hak Akses Menu ({ALL_TAB_ITEMS.length})</th>
+                  <th className="p-3.5">Koneksi Live</th>
                   <th className="p-3.5">Status Akses</th>
                   <th className="p-3.5 text-right">Kelola Akses</th>
                 </tr>
@@ -414,20 +517,34 @@ export const UserAccessManager: React.FC<UserAccessManagerProps> = ({
                 {filteredUsers.map((u) => {
                   const isSelf = currentUser?.id === u.id;
                   const userTabs = getUserAllowedTabs(u);
+                  const isLiveConnected = isUserLiveSyncEnabled(u);
+                  const onlineEntry = onlineUsers.find((o) => String(o.userId) === String(u.id));
                   return (
                     <tr key={u.id} className="hover:bg-slate-50 transition-colors">
                       {/* Name & Contact */}
                       <td className="p-3.5">
                         <div className="font-bold text-slate-900 flex items-center gap-2.5">
-                          <div className="w-8 h-8 rounded-full bg-slate-900 text-amber-400 font-black text-xs flex items-center justify-center flex-shrink-0">
+                          <div className="relative w-8 h-8 rounded-full bg-slate-900 text-amber-400 font-black text-xs flex items-center justify-center flex-shrink-0">
                             {u.name.charAt(0).toUpperCase()}
+                            {onlineEntry && (
+                              <span
+                                className="absolute -bottom-0.5 -right-0.5 w-3 h-3 rounded-full bg-emerald-500 border-2 border-white"
+                                title={`Online (${onlineEntry.connections} perangkat)`}
+                              />
+                            )}
                           </div>
                           <div>
-                            <div className="flex items-center gap-1.5">
+                            <div className="flex items-center gap-1.5 flex-wrap">
                               <span>{u.name}</span>
                               {isSelf && (
                                 <span className="px-1.5 py-0.2 bg-amber-100 text-amber-900 text-[9px] font-black rounded">
                                   Akun Anda
+                                </span>
+                              )}
+                              {onlineEntry && (
+                                <span className="inline-flex items-center gap-1 px-1.5 py-0.5 bg-emerald-100 text-emerald-800 border border-emerald-300 text-[9px] font-black rounded-full">
+                                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
+                                  Online{onlineEntry.connections > 1 ? ` (${onlineEntry.connections})` : ''}
                                 </span>
                               )}
                             </div>
@@ -487,6 +604,41 @@ export const UserAccessManager: React.FC<UserAccessManagerProps> = ({
                         <div className="text-[10px] text-slate-400 mt-1 font-semibold">
                           Total {userTabs.length} dari {ALL_TAB_ITEMS.length} Menu Diizinkan
                         </div>
+                      </td>
+
+                      {/* Live Sync Selection Toggle */}
+                      <td className="p-3.5">
+                        <button
+                          type="button"
+                          disabled={u.role === 'Super Admin' || u.status === 'Nonaktif'}
+                          onClick={() => handleToggleLiveSync(u)}
+                          className={`px-2.5 py-1 rounded-lg text-[10px] font-extrabold inline-flex items-center gap-1.5 border transition-all ${
+                            u.role === 'Super Admin'
+                              ? 'bg-indigo-100 text-indigo-900 border-indigo-200 cursor-default'
+                              : u.status === 'Nonaktif'
+                              ? 'bg-slate-100 text-slate-400 border-slate-200 cursor-not-allowed'
+                              : isLiveConnected
+                              ? 'bg-emerald-100 text-emerald-900 border-emerald-300 hover:bg-emerald-200 cursor-pointer'
+                              : 'bg-amber-100 text-amber-900 border-amber-300 hover:bg-amber-200 cursor-pointer'
+                          }`}
+                          title={
+                            u.role === 'Super Admin'
+                              ? 'Super Admin selalu terhubung Live'
+                              : 'Klik untuk memilih / memutus koneksi Live Multi-Perangkat user ini'
+                          }
+                        >
+                          {isLiveConnected ? (
+                            <>
+                              <Wifi className="w-3 h-3 text-emerald-700" />
+                              <span>Terhubung Live</span>
+                            </>
+                          ) : (
+                            <>
+                              <WifiOff className="w-3 h-3 text-amber-700" />
+                              <span>Non-Live</span>
+                            </>
+                          )}
+                        </button>
                       </td>
 
                       {/* Status */}
@@ -798,6 +950,26 @@ export const UserAccessManager: React.FC<UserAccessManagerProps> = ({
                     </div>
                   )}
                 </div>
+
+                {/* Live Sync Toggle inside Modal */}
+                <label className="flex items-start gap-3 p-3 rounded-xl bg-emerald-50 border border-emerald-200 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={role === 'Super Admin' ? true : liveSyncEnabled}
+                    disabled={role === 'Super Admin'}
+                    onChange={(e) => setLiveSyncEnabled(e.target.checked)}
+                    className="mt-0.5 w-4 h-4 rounded text-emerald-600 focus:ring-emerald-500"
+                  />
+                  <div>
+                    <div className="font-extrabold text-emerald-950 text-xs flex items-center gap-1.5">
+                      <Wifi className="w-3.5 h-3.5 text-emerald-600" />
+                      <span>Hubungkan ke Live Sync Multi-Perangkat (Real-Time)</span>
+                    </div>
+                    <p className="text-[11px] text-emerald-800/80 mt-0.5 leading-snug">
+                      Jika dicentang, setiap input data dari user ini langsung terkirim live ke perangkat lain dan langsung menerima update dari Administrator & tim.
+                    </p>
+                  </div>
+                </label>
               </div>
 
               {/* Section 3: Detailed Menu Permission Checks */}

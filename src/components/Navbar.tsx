@@ -38,13 +38,12 @@ export const Navbar: React.FC<NavbarProps> = ({
 }) => {
 
   const [deferredPrompt, setDeferredPrompt] = useState<any>(null);
-  const [showInstallBtn, setShowInstallBtn] = useState(false);
+  const [showInstallHelp, setShowInstallHelp] = useState(false);
 
   useEffect(() => {
     const handleBeforeInstall = (e: Event) => {
       e.preventDefault();
       setDeferredPrompt(e);
-      setShowInstallBtn(true);
     };
 
     window.addEventListener('beforeinstallprompt', handleBeforeInstall);
@@ -55,14 +54,11 @@ export const Navbar: React.FC<NavbarProps> = ({
 
   const handleInstallApp = async () => {
     if (!deferredPrompt) {
-      alert('Untuk menginstal di HP Android:\n1. Buka link di browser Chrome HP\n2. Klik ikon Opsi (titik tiga di kanan atas)\n3. Pilih "Instal aplikasi" atau "Tambahkan ke Layar Utama"');
+      setShowInstallHelp((prev) => !prev);
       return;
     }
     deferredPrompt.prompt();
-    const { outcome } = await deferredPrompt.userChoice;
-    if (outcome === 'accepted') {
-      setShowInstallBtn(false);
-    }
+    await deferredPrompt.userChoice;
     setDeferredPrompt(null);
   };
 
@@ -161,32 +157,36 @@ export const Navbar: React.FC<NavbarProps> = ({
               className={`inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-bold border transition-all shadow-sm ${
                 cloudStatus?.status === 'permission-denied' || cloudStatus?.status === 'error'
                   ? 'bg-rose-950/90 text-rose-200 hover:bg-rose-900 border-rose-600/70'
-                  : cloudStatus?.status === 'quota-exceeded' || cloudStatus?.status === 'offline'
+                  : cloudStatus?.status === 'paused-by-admin' || cloudStatus?.status === 'quota-exceeded' || cloudStatus?.status === 'offline'
                   ? 'bg-amber-950/90 text-amber-200 hover:bg-amber-900 border-amber-600/70'
                   : 'bg-emerald-950/80 text-emerald-300 hover:bg-emerald-900 border-emerald-700/60'
               }`}
               title={
                 cloudStatus?.lastError ||
-                'Status Sinkronisasi Cloud Lintas Perangkat & Database'
+                'Status Sinkronisasi Live Multi-Perangkat & Database'
               }
             >
               <span
                 className={`w-2 h-2 rounded-full ${
                   cloudStatus?.status === 'permission-denied' || cloudStatus?.status === 'error'
                     ? 'bg-rose-400 animate-ping'
-                    : cloudStatus?.status === 'quota-exceeded' || cloudStatus?.status === 'offline'
+                    : cloudStatus?.status === 'paused-by-admin' || cloudStatus?.status === 'quota-exceeded' || cloudStatus?.status === 'offline'
                     ? 'bg-amber-400 animate-pulse'
                     : 'bg-emerald-400 animate-pulse'
                 }`}
               />
               <Database className="w-3.5 h-3.5" />
               <span className="hidden sm:inline">
-                {cloudStatus?.status === 'quota-exceeded'
+                {cloudStatus?.status === 'paused-by-admin'
+                  ? 'Non-Live (Admin)'
+                  : cloudStatus?.status === 'quota-exceeded'
                   ? 'Sync Terbatas'
                   : cloudStatus?.status === 'permission-denied' || cloudStatus?.status === 'error'
                   ? 'Sync Bermasalah'
                   : cloudStatus?.status === 'offline'
                   ? 'Offline'
+                  : cloudStatus?.liveServerConnected
+                  ? `Live Sync${cloudStatus.onlineUsersCount > 0 ? ` (${cloudStatus.onlineUsersCount})` : ''}`
                   : 'Database & Sync'}
               </span>
             </button>
@@ -225,6 +225,20 @@ export const Navbar: React.FC<NavbarProps> = ({
         </div>
       </div>
 
+      {showInstallHelp && (
+        <div className="bg-slate-800 border-t border-slate-700 px-4 py-2 text-[11px] text-amber-200 flex items-center justify-between gap-3 max-w-7xl mx-auto">
+          <span>
+            Untuk menginstal di HP Android/iOS: buka link di browser Chrome/Safari HP → pilih menu browser → ketuk <strong>"Instal aplikasi"</strong> atau <strong>"Tambahkan ke Layar Utama"</strong>.
+          </span>
+          <button
+            type="button"
+            onClick={() => setShowInstallHelp(false)}
+            className="text-slate-300 hover:text-white font-bold px-2 py-0.5 rounded bg-slate-700"
+          >
+            Tutup
+          </button>
+        </div>
+      )}
     </header>
   );
 };

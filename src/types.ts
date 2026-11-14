@@ -32,6 +32,7 @@ export interface AppUser {
   commissionRatePercent?: number;
   notes?: string;
   allowedTabs?: TabType[]; // Specific menu permissions set by admin
+  liveSyncEnabled?: boolean; // Whether user is selected by Admin for multi-device live sync
 }
 
 export const ALL_TAB_ITEMS: { id: TabType; label: string; description: string; superAdminOnly?: boolean }[] = [
@@ -71,6 +72,13 @@ export const DEFAULT_ROLE_TABS: Record<UserRole, TabType[]> = {
     'dashboard', 'projects', 'siteplan', 'sales', 'user_data', 'prospects', 'attendance', 'kpr_calc'
   ],
 };
+
+export function isUserLiveSyncEnabled(user: AppUser | null): boolean {
+  if (!user) return false;
+  if (user.status !== 'Aktif') return false;
+  if (user.role === 'Super Admin') return true;
+  return user.liveSyncEnabled !== false;
+}
 
 export function getUserAllowedTabs(user: AppUser | null): TabType[] {
   if (!user) return ['dashboard'];

@@ -215,7 +215,7 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ users, onLoginSuccess,
             {isCheckingCloud ? (
               <>
                 <RefreshCw className="w-4 h-4 animate-spin text-slate-950" />
-                <span>Memeriksa Cloud Firestore...</span>
+                <span>Menghubungkan Live Server & Cloud...</span>
               </>
             ) : (
               <>

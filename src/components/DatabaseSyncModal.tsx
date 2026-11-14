@@ -1,8 +1,9 @@
 import React, { useState } from 'react';
-import { Database, Download, Upload, RefreshCw, CheckCircle2, ShieldCheck, X, HardDrive, Cpu, Radio, Lock, Server, Link, Settings, AlertTriangle } from 'lucide-react';
+import { Database, Download, Upload, RefreshCw, CheckCircle2, ShieldCheck, X, HardDrive, Cpu, Radio, Lock, Server, Link, Settings, AlertTriangle, Wifi } from 'lucide-react';
 import { exportDatabaseToJson, importDatabaseFromJson, idbGetAllKeys } from '../utils/indexedDB';
 import { AppUser } from '../types';
 import { saveSupabaseConfig, isSupabaseConnected } from '../utils/supabase';
+import type { LiveOnlineUser } from '../utils/liveSync';
 import {
   checkIsFirebaseQuotaExceeded,
   saveToCloud,
@@ -13,16 +14,20 @@ import {
 
 interface DatabaseSyncModalProps {
   currentUser: AppUser | null;
+  onlineUsers?: LiveOnlineUser[];
   onClose: () => void;
   onDataReload: () => void;
   onManualSyncNow?: () => Promise<void>;
+  onPublishAllToLive?: () => Promise<boolean>;
 }
 
 export const DatabaseSyncModal: React.FC<DatabaseSyncModalProps> = ({
   currentUser,
+  onlineUsers = [],
   onClose,
   onDataReload,
   onManualSyncNow,
+  onPublishAllToLive,
 }) => {
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
   const [isProcessing, setIsProcessing] = useState(false);
@@ -142,32 +147,38 @@ export const DatabaseSyncModal: React.FC<DatabaseSyncModalProps> = ({
           
           {/* Storage Technology Banner */}
           <div
-            className={`p-3 rounded-xl space-y-1.5 border ${
+            className={`p-3 rounded-xl space-y-2 border ${
               cloudStatus.status === 'permission-denied' || cloudStatus.status === 'error'
                 ? 'bg-rose-950/40 border-rose-800/70'
-                : cloudStatus.status === 'quota-exceeded' || cloudStatus.status === 'offline'
+                : cloudStatus.status === 'paused-by-admin' || cloudStatus.status === 'quota-exceeded' || cloudStatus.status === 'offline'
                 ? 'bg-amber-950/40 border-amber-800/70'
                 : 'bg-emerald-950/40 border-emerald-800/60'
             }`}
           >
             <div className="flex items-center justify-between gap-2 flex-wrap">
               <span className="font-extrabold flex items-center gap-1.5 text-xs text-slate-100">
-                <HardDrive className="w-4 h-4 text-emerald-400" /> Status Cloud Sync Lintas Perangkat
+                <Wifi className="w-4 h-4 text-emerald-400" /> Status Live Sync Lintas Perangkat
               </span>
               <span
                 className={`px-2 py-0.5 rounded-full text-[10px] font-black border ${
-                  cloudStatus.status === 'permission-denied' || cloudStatus.status === 'error'
+                  cloudStatus.status === 'paused-by-admin'
+                    ? 'bg-amber-500/20 text-amber-300 border-amber-500/40'
+                    : cloudStatus.status === 'permission-denied' || cloudStatus.status === 'error'
                     ? 'bg-rose-500/20 text-rose-300 border-rose-500/40'
-                    : cloudStatus.status === 'quota-exceeded' || checkIsFirebaseQuotaExceeded()
+                    : cloudStatus.status === 'quota-exceeded'
                     ? 'bg-amber-500/20 text-amber-300 border-amber-500/40'
                     : cloudStatus.status === 'offline'
                     ? 'bg-slate-700 text-slate-300 border-slate-600'
                     : 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40'
                 }`}
               >
-                {cloudStatus.status === 'permission-denied'
+                {cloudStatus.status === 'paused-by-admin'
+                  ? '⏸ NON-LIVE (DIATUR ADMIN)'
+                  : cloudStatus.liveServerConnected
+                  ? '✓ LIVE SERVER TERHUBUNG'
+                  : cloudStatus.status === 'permission-denied'
                   ? '⚠ AKSES FIRESTORE DITOLAK'
-                  : cloudStatus.status === 'quota-exceeded' || checkIsFirebaseQuotaExceeded()
+                  : cloudStatus.status === 'quota-exceeded'
                   ? supabaseActive
                     ? '⚡ DIALIHKAN KE SUPABASE CLOUD'
                     : '⚠ KUOTA HARIAN FIRESTORE HABIS'
@@ -179,51 +190,97 @@ export const DatabaseSyncModal: React.FC<DatabaseSyncModalProps> = ({
               </span>
             </div>
             <p className="text-[11px] text-slate-300 leading-relaxed">
-              Seluruh input data di perangkat ini disinkronkan langsung via <strong>Cloud Firestore</strong>
-              {supabaseActive ? ' + Supabase Cloud' : ''} serta disimpan offline-first di <strong>IndexedDB</strong>.
+              Sinkronisasi lintas perangkat berjalan real-time melalui <strong>ERP Live Server (SSE)</strong>
+              {!cloudStatus.writeQuotaExceeded ? ' + Cloud Firestore' : ''}
+              {supabaseActive ? ' + Supabase Cloud' : ''} serta backup offline di <strong>IndexedDB</strong>.
             </p>
-            {cloudStatus.lastError && (
-              <div className="mt-1 p-2.5 bg-amber-950/70 border border-amber-700/80 rounded-lg text-amber-200 text-[10px] flex items-start gap-2">
-                <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
-                <div className="space-y-1">
-                  <div className="font-bold">{cloudStatus.lastError}</div>
-                  {cloudStatus.writeQuotaExceeded && !supabaseActive && (
-                    <div className="text-amber-300/90">
-                      Agar perubahan langsung tersinkronisasi ke perangkat lain hari ini juga, Anda dapat menghubungkan <strong>Supabase</strong> di bawah atau menunggu reset kuota harian Firestore besok.
-                    </div>
-                  )}
+
+            {onlineUsers.length > 0 && (
+              <div className="p-2 bg-slate-900/70 border border-emerald-800/50 rounded-lg space-y-1">
+                <div className="text-[10px] font-bold text-emerald-300">
+                  User Sedang Online Live ({onlineUsers.length}):
+                </div>
+                <div className="flex flex-wrap gap-1.5">
+                  {onlineUsers.map((ou) => (
+                    <span
+                      key={ou.userId}
+                      className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-emerald-500/15 border border-emerald-500/30 text-[10px] font-bold text-emerald-200"
+                    >
+                      <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                      {ou.userName} ({ou.userRole})
+                    </span>
+                  ))}
                 </div>
               </div>
             )}
+
+            {cloudStatus.writeQuotaExceeded && cloudStatus.liveServerConnected && (
+              <div className="p-2 bg-slate-900/60 border border-slate-700 rounded-lg text-slate-300 text-[10px]">
+                Info: Kuota tulis harian gratis Firestore sedang penuh hari ini, namun sinkronisasi real-time antar perangkat tetap berjalan lancar melalui <strong>ERP Live Server</strong>.
+              </div>
+            )}
+
+            {cloudStatus.lastError && (
+              <div className="mt-1 p-2.5 bg-amber-950/70 border border-amber-700/80 rounded-lg text-amber-200 text-[10px] flex items-start gap-2">
+                <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
+                <div className="font-bold">{cloudStatus.lastError}</div>
+              </div>
+            )}
+
             <div className="pt-1 flex items-center justify-between gap-2 flex-wrap">
               <span className="text-[10px] text-slate-400">
                 {cloudStatus.lastSyncAt
                   ? `Sync terakhir: ${new Date(cloudStatus.lastSyncAt).toLocaleTimeString('id-ID')}`
                   : 'Menunggu sinkronisasi...'}
               </span>
-              <button
-                type="button"
-                disabled={isProcessing}
-                onClick={async () => {
-                  setIsProcessing(true);
-                  try {
-                    if (onManualSyncNow) {
-                      await onManualSyncNow();
-                    } else {
-                      onDataReload();
+              <div className="flex items-center gap-2 flex-wrap">
+                {currentUser?.role === 'Super Admin' && onPublishAllToLive && (
+                  <button
+                    type="button"
+                    disabled={isProcessing}
+                    onClick={async () => {
+                      setIsProcessing(true);
+                      try {
+                        const ok = await onPublishAllToLive();
+                        setStatusMessage(
+                          ok
+                            ? '✓ Seluruh data di perangkat Admin berhasil dipublikasikan ke Live Server!'
+                            : '⚠ Gagal mempublikasikan data ke Live Server.'
+                        );
+                      } finally {
+                        setIsProcessing(false);
+                      }
+                    }}
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-amber-500 hover:bg-amber-400 text-slate-950 font-black rounded-lg text-[11px] transition-colors cursor-pointer disabled:opacity-50"
+                  >
+                    <Upload className="w-3.5 h-3.5" />
+                    <span>Push Live ke Semua User</span>
+                  </button>
+                )}
+                <button
+                  type="button"
+                  disabled={isProcessing}
+                  onClick={async () => {
+                    setIsProcessing(true);
+                    try {
+                      if (onManualSyncNow) {
+                        await onManualSyncNow();
+                      } else {
+                        onDataReload();
+                      }
+                      setStatusMessage('✓ Data terbaru berhasil ditarik dari Live Server.');
+                    } catch {
+                      setStatusMessage('⚠ Gagal menarik pembaruan dari Live Server.');
+                    } finally {
+                      setIsProcessing(false);
                     }
-                    setStatusMessage('✓ Data terbaru berhasil ditarik dari Cloud Server.');
-                  } catch {
-                    setStatusMessage('⚠ Gagal menarik pembaruan dari Cloud Server.');
-                  } finally {
-                    setIsProcessing(false);
-                  }
-                }}
-                className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white font-bold rounded-lg text-[11px] transition-colors cursor-pointer disabled:opacity-50"
-              >
-                <RefreshCw className={`w-3.5 h-3.5 ${isProcessing ? 'animate-spin' : ''}`} />
-                <span>Tarik Data Terbaru dari Cloud</span>
-              </button>
+                  }}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white font-bold rounded-lg text-[11px] transition-colors cursor-pointer disabled:opacity-50"
+                >
+                  <RefreshCw className={`w-3.5 h-3.5 ${isProcessing ? 'animate-spin' : ''}`} />
+                  <span>Tarik Data Terbaru</span>
+                </button>
+              </div>
             </div>
           </div>
 

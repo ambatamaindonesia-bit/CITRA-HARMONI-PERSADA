@@ -10,6 +10,7 @@ import {
   AppUser,
   CustomerProfile,
   getUserAllowedTabs,
+  isUserLiveSyncEnabled,
   TabType,
   MaterialItem,
   MaterialUsageRecord,
@@ -62,10 +63,19 @@ import {
   subscribeToCloudKey,
   subscribeCloudStatus,
   getCloudStatus,
+  setUserLiveSyncPermission,
   CloudStatusInfo,
   CLIENT_TAB_ID,
   CloudSyncMeta,
 } from './utils/firebase';
+import {
+  fetchAllLiveState,
+  bootstrapLiveServer,
+  connectLiveEventStream,
+  reportLivePresence,
+  subscribeLiveConnectionState,
+  LiveOnlineUser,
+} from './utils/liveSync';
 import { fetchUsersFromSupabase, saveUsersToSupabase, isSupabaseConnected, saveSupabaseConfig } from './utils/supabase';
 import { formatRupiah } from './utils/formatters';
 import { Building2, RefreshCw, Radio, X } from 'lucide-react';
@@ -170,14 +180,28 @@ export default function App() {
   const [showDatabaseSyncModal, setShowDatabaseSyncModal] = useState<boolean>(false);
   const [syncNotice, setSyncNotice] = useState<{ id: string; message: string } | null>(null);
   const [cloudStatus, setCloudStatus] = useState<CloudStatusInfo>(() => getCloudStatus());
+  const [onlineUsers, setOnlineUsers] = useState<LiveOnlineUser[]>([]);
 
   // Refs to prevent echo loops between Cloud/Broadcast updates and local persistence effects
   const lastRemoteJsonRef = useRef<Record<string, string>>({});
   const skipCloudWriteJsonRef = useRef<Record<string, string>>({});
   const lastResumePullRef = useRef<number>(0);
+  const serverMissingKeysRef = useRef<Set<string>>(new Set());
+  const currentUserRef = useRef<AppUser | null>(currentUser);
 
   useEffect(() => {
-    return subscribeCloudStatus(setCloudStatus);
+    currentUserRef.current = currentUser;
+  }, [currentUser]);
+
+  useEffect(() => {
+    const unsubCloud = subscribeCloudStatus(setCloudStatus);
+    const unsubLive = subscribeLiveConnectionState((liveConn) => {
+      setOnlineUsers(liveConn.onlineUsers || []);
+    });
+    return () => {
+      unsubCloud();
+      unsubLive();
+    };
   }, []);
 
   const DATA_SYNC_LABELS: Record<string, string> = {
@@ -283,8 +307,26 @@ export default function App() {
         }
       }
 
-      // Load from Supabase "users" table & Cloud Firestore (with explicit status to prevent offline overwrite)
-      const supabaseUsers = await fetchUsersFromSupabase();
+      // Load from Live Server in 1 fast call, Supabase "users" table & Cloud Firestore
+      const activeUserId = currentUserRef.current?.id;
+      const [liveState, supabaseUsers] = await Promise.all([
+        fetchAllLiveState(activeUserId),
+        fetchUsersFromSupabase(),
+      ]);
+
+      if (liveState?.onlineUsers) {
+        setOnlineUsers(liveState.onlineUsers);
+      }
+
+      const loadKeyPreferLive = async <T,>(key: string) => {
+        const liveRec = liveState?.keys?.[key];
+        if (liveRec && liveRec.payload !== undefined) {
+          serverMissingKeysRef.current.delete(key);
+          return { data: liveRec.payload as T, existsInCloud: true };
+        }
+        serverMissingKeysRef.current.add(key);
+        return loadFromCloudWithStatus<T>(key, activeUserId);
+      };
 
       const [
         cloudUsersRes,
@@ -300,18 +342,18 @@ export default function App() {
         cloudAttendanceRes,
         cloudProspectsRes,
       ] = await Promise.all([
-        loadFromCloudWithStatus<AppUser[]>('yp_erp_users'),
-        loadFromCloudWithStatus<HousingProject[]>('yp_erp_projects'),
-        loadFromCloudWithStatus<Unit[]>('yp_erp_units'),
-        loadFromCloudWithStatus<SalesTransaction[]>('yp_erp_sales'),
-        loadFromCloudWithStatus<ConstructionMilestone[]>('yp_erp_construction'),
-        loadFromCloudWithStatus<FinancialRecord[]>('yp_erp_finances'),
-        loadFromCloudWithStatus<CustomerProfile[]>('yp_erp_customers'),
-        loadFromCloudWithStatus<MaterialItem[]>('yp_erp_materials'),
-        loadFromCloudWithStatus<MaterialUsageRecord[]>('yp_erp_material_usages'),
-        loadFromCloudWithStatus<ProgressDocumentation[]>('yp_erp_progress_docs'),
-        loadFromCloudWithStatus<AttendanceRecord[]>('yp_erp_attendance'),
-        loadFromCloudWithStatus<ProspectRecord[]>('yp_erp_prospects'),
+        loadKeyPreferLive<AppUser[]>('yp_erp_users'),
+        loadKeyPreferLive<HousingProject[]>('yp_erp_projects'),
+        loadKeyPreferLive<Unit[]>('yp_erp_units'),
+        loadKeyPreferLive<SalesTransaction[]>('yp_erp_sales'),
+        loadKeyPreferLive<ConstructionMilestone[]>('yp_erp_construction'),
+        loadKeyPreferLive<FinancialRecord[]>('yp_erp_finances'),
+        loadKeyPreferLive<CustomerProfile[]>('yp_erp_customers'),
+        loadKeyPreferLive<MaterialItem[]>('yp_erp_materials'),
+        loadKeyPreferLive<MaterialUsageRecord[]>('yp_erp_material_usages'),
+        loadKeyPreferLive<ProgressDocumentation[]>('yp_erp_progress_docs'),
+        loadKeyPreferLive<AttendanceRecord[]>('yp_erp_attendance'),
+        loadKeyPreferLive<ProspectRecord[]>('yp_erp_prospects'),
       ]);
 
       const cloudUsers = cloudUsersRes.data;
@@ -437,10 +479,20 @@ export default function App() {
     }
   };
 
-  // Throttled server pull when another device wakes from sleep, regains tab focus, or reconnects online
+  // Throttled server pull when another device wakes from sleep, regains tab focus, reconnects, or periodic backup
   const syncLatestFromCloud = async (force = false) => {
+    const activeUser = currentUserRef.current;
+    if (activeUser && !isUserLiveSyncEnabled(activeUser)) {
+      // Still check yp_erp_users in case Admin re-enabled this user
+      const usersOnly = await loadFromCloudWithStatus<AppUser[]>('yp_erp_users', activeUser.id);
+      if (usersOnly.existsInCloud && Array.isArray(usersOnly.data) && usersOnly.data.length > 0) {
+        applyRemoteState('yp_erp_users', usersOnly.data, setUsers);
+      }
+      return;
+    }
+
     const now = Date.now();
-    if (!force && now - lastResumePullRef.current < 4000) return;
+    if (!force && now - lastResumePullRef.current < 3500) return;
     lastResumePullRef.current = now;
 
     try {
@@ -463,7 +515,32 @@ export default function App() {
         { key: 'yp_erp_prospects', setter: setProspects },
       ];
 
-      const results = await Promise.all(pulls.map((p) => loadFromCloudWithStatus<any[]>(p.key)));
+      // 1. Try fast single-call Live Server state pull first
+      const liveState = await fetchAllLiveState(activeUser?.id);
+      if (liveState && liveState.ok) {
+        if (liveState.onlineUsers) {
+          setOnlineUsers(liveState.onlineUsers);
+        }
+        for (const target of pulls) {
+          const rec = liveState.keys?.[target.key];
+          if (rec && Array.isArray(rec.payload)) {
+            if (target.requireNonEmpty && rec.payload.length === 0) continue;
+            applyRemoteState(target.key, rec.payload, target.setter, {
+              updatedAt: rec.updatedAt,
+              updatedBy: rec.updatedBy,
+              updatedByClientId: rec.updatedByClientId,
+              lastAction: rec.lastAction,
+              actionDetail: rec.actionDetail,
+            });
+          }
+        }
+        if (Object.keys(liveState.keys || {}).length > 0) {
+          return;
+        }
+      }
+
+      // 2. Fallback to Firestore/Supabase per-key pull if Live Server had no keys
+      const results = await Promise.all(pulls.map((p) => loadFromCloudWithStatus<any[]>(p.key, activeUser?.id)));
       results.forEach((res, idx) => {
         const target = pulls[idx];
         if (res.existsInCloud && Array.isArray(res.data)) {
@@ -479,6 +556,52 @@ export default function App() {
   useEffect(() => {
     reloadAllFromDatabase();
   }, []);
+
+  // Sync live permission & presence whenever currentUser logs in/out or changes
+  useEffect(() => {
+    if (!isDbLoaded) return;
+    const allowed = isUserLiveSyncEnabled(currentUser);
+    setUserLiveSyncPermission(Boolean(currentUser), allowed);
+    reportLivePresence(
+      currentUser ? { id: currentUser.id, name: currentUser.name, role: currentUser.role } : null
+    );
+
+    // If Super Admin logs in and Live Server is still missing any collections, publish Admin's data automatically
+    if (currentUser?.role === 'Super Admin' && serverMissingKeysRef.current.size > 0) {
+      const allDatasets: Record<string, unknown> = {
+        yp_erp_users: users,
+        yp_erp_projects: projects,
+        yp_erp_units: units,
+        yp_erp_sales: sales,
+        yp_erp_construction: construction,
+        yp_erp_finances: finances,
+        yp_erp_customers: customers,
+        yp_erp_materials: materials,
+        yp_erp_material_usages: materialUsages,
+        yp_erp_progress_docs: progressDocs,
+        yp_erp_attendance: attendanceRecords,
+        yp_erp_prospects: prospects,
+      };
+      const missingOnly: Record<string, unknown> = {};
+      serverMissingKeysRef.current.forEach((k) => {
+        if (allDatasets[k] !== undefined) {
+          missingOnly[k] = allDatasets[k];
+        }
+      });
+      if (Object.keys(missingOnly).length > 0) {
+        bootstrapLiveServer(missingOnly, {
+          overwrite: false,
+          updatedBy: currentUser.name,
+          updatedByUserId: currentUser.id,
+          actionDetail: 'Sinkronisasi otomatis data Administrator ke Live Server',
+        }).then((res) => {
+          if (res.ok) {
+            serverMissingKeysRef.current.clear();
+          }
+        });
+      }
+    }
+  }, [isDbLoaded, currentUser?.id, currentUser?.status, currentUser?.liveSyncEnabled, currentUser?.role]);
 
   useEffect(() => {
     if (!isDbLoaded) return;
@@ -499,62 +622,142 @@ export default function App() {
     window.addEventListener('online', onOnline);
     window.addEventListener('focus', onFocus);
 
+    // Light safety poll while visible (backup if mobile browser pauses SSE in background)
+    const intervalId = setInterval(() => {
+      if (document.visibilityState === 'visible') {
+        syncLatestFromCloud(false);
+      }
+    }, 20000);
+
     return () => {
       document.removeEventListener('visibilitychange', onVisibility);
       window.removeEventListener('online', onOnline);
       window.removeEventListener('focus', onFocus);
+      clearInterval(intervalId);
     };
   }, [isDbLoaded]);
 
-  // Subscribe to Realtime Cloud Firestore Changes across all devices
+  // Subscribe to Realtime Live Server SSE + Cloud Firestore Changes across all devices
   useEffect(() => {
     if (!isDbLoaded) return;
 
+    const dispatchKeyToSetter = (key: string, payload: unknown, meta?: CloudSyncMeta) => {
+      if (!Array.isArray(payload)) return;
+      const activeUser = currentUserRef.current;
+      // Enforce Admin-selected Live Sync gate: paused users only listen to yp_erp_users
+      if (key !== 'yp_erp_users' && activeUser && !isUserLiveSyncEnabled(activeUser)) {
+        return;
+      }
+
+      switch (key) {
+        case 'yp_erp_users':
+          if (payload.length > 0) applyRemoteState(key, payload as AppUser[], setUsers, meta);
+          break;
+        case 'yp_erp_projects':
+          applyRemoteState(key, payload as HousingProject[], setProjects, meta);
+          break;
+        case 'yp_erp_units':
+          applyRemoteState(key, payload as Unit[], setUnits, meta);
+          break;
+        case 'yp_erp_sales':
+          applyRemoteState(key, payload as SalesTransaction[], setSales, meta);
+          break;
+        case 'yp_erp_construction':
+          applyRemoteState(key, payload as ConstructionMilestone[], setConstruction, meta);
+          break;
+        case 'yp_erp_finances':
+          applyRemoteState(key, payload as FinancialRecord[], setFinances, meta);
+          break;
+        case 'yp_erp_customers':
+          applyRemoteState(key, payload as CustomerProfile[], setCustomers, meta);
+          break;
+        case 'yp_erp_materials':
+          applyRemoteState(key, payload as MaterialItem[], setMaterials, meta);
+          break;
+        case 'yp_erp_material_usages':
+          applyRemoteState(key, payload as MaterialUsageRecord[], setMaterialUsages, meta);
+          break;
+        case 'yp_erp_progress_docs':
+          applyRemoteState(key, payload as ProgressDocumentation[], setProgressDocs, meta);
+          break;
+        case 'yp_erp_attendance':
+          applyRemoteState(key, payload as AttendanceRecord[], setAttendanceRecords, meta);
+          break;
+        case 'yp_erp_prospects':
+          applyRemoteState(key, payload as ProspectRecord[], setProspects, meta);
+          break;
+      }
+    };
+
+    const unsubSse = connectLiveEventStream(
+      currentUser
+        ? { id: currentUser.id, name: currentUser.name, role: currentUser.role }
+        : null,
+      {
+        onKeyUpdated: (key, rec) => {
+          dispatchKeyToSetter(key, rec.payload, {
+            updatedAt: rec.updatedAt,
+            updatedBy: rec.updatedBy,
+            updatedByClientId: rec.updatedByClientId,
+            lastAction: rec.lastAction,
+            actionDetail: rec.actionDetail,
+          });
+        },
+        onPresenceUpdate: (usersOnline) => {
+          setOnlineUsers(usersOnline);
+        },
+        onReconnect: () => {
+          syncLatestFromCloud(true);
+        },
+      }
+    );
+
     const unsubs = [
+      unsubSse,
       subscribeToCloudKey<AppUser[]>('yp_erp_users', (data, meta) => {
         if (data && Array.isArray(data) && data.length > 0) applyRemoteState('yp_erp_users', data, setUsers, meta);
       }),
       subscribeToCloudKey<HousingProject[]>('yp_erp_projects', (data, meta) => {
-        if (data && Array.isArray(data)) applyRemoteState('yp_erp_projects', data, setProjects, meta);
+        dispatchKeyToSetter('yp_erp_projects', data, meta);
       }),
       subscribeToCloudKey<Unit[]>('yp_erp_units', (data, meta) => {
-        if (data && Array.isArray(data)) applyRemoteState('yp_erp_units', data, setUnits, meta);
+        dispatchKeyToSetter('yp_erp_units', data, meta);
       }),
       subscribeToCloudKey<SalesTransaction[]>('yp_erp_sales', (data, meta) => {
-        if (data && Array.isArray(data)) applyRemoteState('yp_erp_sales', data, setSales, meta);
+        dispatchKeyToSetter('yp_erp_sales', data, meta);
       }),
       subscribeToCloudKey<ConstructionMilestone[]>('yp_erp_construction', (data, meta) => {
-        if (data && Array.isArray(data)) applyRemoteState('yp_erp_construction', data, setConstruction, meta);
+        dispatchKeyToSetter('yp_erp_construction', data, meta);
       }),
       subscribeToCloudKey<FinancialRecord[]>('yp_erp_finances', (data, meta) => {
-        if (data && Array.isArray(data)) applyRemoteState('yp_erp_finances', data, setFinances, meta);
+        dispatchKeyToSetter('yp_erp_finances', data, meta);
       }),
       subscribeToCloudKey<CustomerProfile[]>('yp_erp_customers', (data, meta) => {
-        if (data && Array.isArray(data)) applyRemoteState('yp_erp_customers', data, setCustomers, meta);
+        dispatchKeyToSetter('yp_erp_customers', data, meta);
       }),
       subscribeToCloudKey<MaterialItem[]>('yp_erp_materials', (data, meta) => {
-        if (data && Array.isArray(data)) applyRemoteState('yp_erp_materials', data, setMaterials, meta);
+        dispatchKeyToSetter('yp_erp_materials', data, meta);
       }),
       subscribeToCloudKey<MaterialUsageRecord[]>('yp_erp_material_usages', (data, meta) => {
-        if (data && Array.isArray(data)) applyRemoteState('yp_erp_material_usages', data, setMaterialUsages, meta);
+        dispatchKeyToSetter('yp_erp_material_usages', data, meta);
       }),
       subscribeToCloudKey<ProgressDocumentation[]>('yp_erp_progress_docs', (data, meta) => {
-        if (data && Array.isArray(data)) applyRemoteState('yp_erp_progress_docs', data, setProgressDocs, meta);
+        dispatchKeyToSetter('yp_erp_progress_docs', data, meta);
       }),
       subscribeToCloudKey<AttendanceRecord[]>('yp_erp_attendance', (data, meta) => {
-        if (data && Array.isArray(data)) applyRemoteState('yp_erp_attendance', data, setAttendanceRecords, meta);
+        dispatchKeyToSetter('yp_erp_attendance', data, meta);
       }),
       subscribeToCloudKey<ProspectRecord[]>('yp_erp_prospects', (data, meta) => {
-        if (data && Array.isArray(data)) applyRemoteState('yp_erp_prospects', data, setProspects, meta);
+        dispatchKeyToSetter('yp_erp_prospects', data, meta);
       }),
     ];
 
     return () => {
       unsubs.forEach((unsub) => unsub && unsub());
     };
-  }, [isDbLoaded, syncGeneration]);
+  }, [isDbLoaded, syncGeneration, currentUser?.id]);
 
-  // Real-time synchronization of currentUser permissions/menus whenever users array updates
+  // Real-time synchronization of currentUser permissions/menus/live-status whenever users array updates
   useEffect(() => {
     if (!currentUser) return;
 
@@ -572,9 +775,23 @@ export default function App() {
         return;
       }
 
+      const wasLive = isUserLiveSyncEnabled(currentUser);
+      const isNowLive = isUserLiveSyncEnabled(matchedUser);
+      if (wasLive && !isNowLive) {
+        setSyncNotice({
+          id: `${Date.now()}-live-paused`,
+          message: `Koneksi Live Sync untuk akun (${matchedUser.name}) dinonaktifkan sementara oleh Administrator.`,
+        });
+      } else if (!wasLive && isNowLive) {
+        setSyncNotice({
+          id: `${Date.now()}-live-resumed`,
+          message: `Akun (${matchedUser.name}) kini dihubungkan ke Live Sync oleh Administrator. Menarik data terbaru...`,
+        });
+        syncLatestFromCloud(true);
+      }
+
       const isDifferent = JSON.stringify(matchedUser) !== JSON.stringify(currentUser);
       if (isDifferent) {
-        console.log('Realtime user settings/permissions updated from Cloud:', matchedUser);
         setCurrentUser(matchedUser);
       }
     }
@@ -684,14 +901,22 @@ export default function App() {
 
     delete skipCloudWriteJsonRef.current[key];
     lastRemoteJsonRef.current[key] = json;
+
+    const activeUser = currentUserRef.current;
+    if (activeUser && !isUserLiveSyncEnabled(activeUser)) {
+      broadcastDataUpdate(key, data, activeUser.name);
+      return;
+    }
+
     if (alsoSaveSupabaseUsers && Array.isArray(data)) {
       saveUsersToSupabase(data);
     }
     saveToCloud(key, data, true, {
-      updatedBy: currentUser?.name,
+      updatedBy: activeUser?.name,
+      updatedByUserId: activeUser?.id,
       actionDetail: DATA_SYNC_LABELS[key],
     });
-    broadcastDataUpdate(key, data, currentUser?.name);
+    broadcastDataUpdate(key, data, activeUser?.name);
   };
 
   // Auto Persistence to IndexedDB + LocalStorage Cache + Supabase Users Table + Realtime Broadcast
@@ -895,8 +1120,51 @@ export default function App() {
     } catch (e) {
       console.warn('localStorage write failed for yp_erp_finances:', e);
     }
-    saveToCloud('yp_erp_finances', nextFinances, true, meta);
-    broadcastDataUpdate('yp_erp_finances', nextFinances, meta?.updatedBy || currentUser?.name);
+    const activeUser = currentUserRef.current;
+    if (!activeUser || isUserLiveSyncEnabled(activeUser)) {
+      saveToCloud('yp_erp_finances', nextFinances, true, {
+        ...meta,
+        updatedByUserId: activeUser?.id,
+      });
+    }
+    broadcastDataUpdate('yp_erp_finances', nextFinances, meta?.updatedBy || activeUser?.name);
+  };
+
+  // Manual force-publish all Admin data to Live Server (and Cloud) for all connected devices
+  const handlePublishAllToLiveServer = async (): Promise<boolean> => {
+    const activeUser = currentUserRef.current;
+    if (!activeUser || activeUser.role !== 'Super Admin') return false;
+
+    const allDatasets: Record<string, unknown> = {
+      yp_erp_users: users,
+      yp_erp_projects: projects,
+      yp_erp_units: units,
+      yp_erp_sales: sales,
+      yp_erp_construction: construction,
+      yp_erp_finances: finances,
+      yp_erp_customers: customers,
+      yp_erp_materials: materials,
+      yp_erp_material_usages: materialUsages,
+      yp_erp_progress_docs: progressDocs,
+      yp_erp_attendance: attendanceRecords,
+      yp_erp_prospects: prospects,
+    };
+
+    const res = await bootstrapLiveServer(allDatasets, {
+      overwrite: true,
+      updatedBy: activeUser.name,
+      updatedByUserId: activeUser.id,
+      actionDetail: 'Seluruh data ERP disinkronkan oleh Super Admin ke semua user terhubung',
+    });
+
+    if (res.ok) {
+      serverMissingKeysRef.current.clear();
+      setSyncNotice({
+        id: `${Date.now()}-live-publish`,
+        message: 'Seluruh data ERP berhasil dipublikasikan Live ke semua perangkat user terhubung.',
+      });
+    }
+    return res.ok;
   };
 
   // Sync linked SalesTransaction (UTJ / DP paid) when a linked FinanceRecord is deleted, restored, or edited
@@ -962,11 +1230,15 @@ export default function App() {
       } catch (e) {
         console.warn('localStorage write failed for yp_erp_sales:', e);
       }
-      saveToCloud('yp_erp_sales', nextSales, true, {
-        updatedBy: actorName,
-        lastAction: 'SYNC_SALES_FROM_FINANCE',
-        actionDetail: actionNote,
-      });
+      const activeUser = currentUserRef.current;
+      if (!activeUser || isUserLiveSyncEnabled(activeUser)) {
+        saveToCloud('yp_erp_sales', nextSales, true, {
+          updatedBy: actorName,
+          updatedByUserId: activeUser?.id,
+          lastAction: 'SYNC_SALES_FROM_FINANCE',
+          actionDetail: actionNote,
+        });
+      }
       broadcastDataUpdate('yp_erp_sales', nextSales, actorName);
     }
   };
@@ -1549,9 +1821,12 @@ export default function App() {
               <UserAccessManager
                 users={users}
                 currentUser={currentUser}
+                onlineUsers={onlineUsers}
                 onAddUser={handleAddUser}
                 onUpdateUser={handleUpdateUser}
                 onDeleteUser={handleDeleteUser}
+                onBulkUpdateUsers={(nextUsers) => setUsers(nextUsers)}
+                onPublishAllToLive={handlePublishAllToLiveServer}
               />
             )}
 
@@ -1629,9 +1904,11 @@ export default function App() {
         {showDatabaseSyncModal && (
           <DatabaseSyncModal
             currentUser={currentUser}
+            onlineUsers={onlineUsers}
             onClose={() => setShowDatabaseSyncModal(false)}
             onDataReload={reloadAllFromDatabase}
             onManualSyncNow={() => syncLatestFromCloud(true)}
+            onPublishAllToLive={handlePublishAllToLiveServer}
           />
         )}
 

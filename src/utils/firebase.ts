@@ -10,6 +10,15 @@ import {
 } from 'firebase/firestore';
 import firebaseConfig from '../../firebase-applet-config.json';
 import { saveToSupabase, loadFromSupabase, subscribeToSupabaseKey, isSupabaseConnected } from './supabase';
+import {
+  CLIENT_TAB_ID,
+  fetchLiveKey,
+  pushLiveKey,
+  getLiveConnectionState,
+  subscribeLiveConnectionState,
+} from './liveSync';
+
+export { CLIENT_TAB_ID };
 
 const app = !getApps().length ? initializeApp(firebaseConfig) : getApp();
 
@@ -19,12 +28,6 @@ const dbId =
     : '(default)';
 
 export const db = getFirestore(app, dbId);
-
-// Unique ID per browser tab/session to distinguish remote updates from local echoes
-export const CLIENT_TAB_ID =
-  typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
-    ? crypto.randomUUID()
-    : `tab-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
 
 export enum OperationType {
   CREATE = 'create',
@@ -48,6 +51,7 @@ interface FirestoreErrorInfo {
 export type CloudStatusType =
   | 'connecting'
   | 'connected'
+  | 'paused-by-admin'
   | 'permission-denied'
   | 'quota-exceeded'
   | 'offline'
@@ -59,11 +63,15 @@ export interface CloudStatusInfo {
   lastSyncAt?: string;
   writeQuotaExceeded: boolean;
   readQuotaExceeded: boolean;
+  liveServerConnected: boolean;
+  onlineUsersCount: number;
+  userLiveSyncEnabled: boolean;
 }
 
 export interface CloudSyncMeta {
   updatedAt?: string;
   updatedBy?: string;
+  updatedByUserId?: string;
   updatedByClientId?: string;
   lastAction?: string;
   actionDetail?: string;
@@ -82,22 +90,46 @@ const CHUNK_CHAR_SIZE = 550_000;
 
 let isFirebaseWriteQuotaExceeded = false;
 let isFirebaseReadQuotaExceeded = false;
+let currentUserLiveSyncAllowed = true;
+let hasLoggedInUserContext = false;
+
 let cloudStatusState: CloudStatusInfo = {
   status: 'connecting',
   writeQuotaExceeded: false,
   readQuotaExceeded: false,
+  liveServerConnected: getLiveConnectionState().connected,
+  onlineUsersCount: getLiveConnectionState().onlineUsers.length,
+  userLiveSyncEnabled: true,
 };
 
 const statusListeners = new Set<(info: CloudStatusInfo) => void>();
 const writeDebounceTimers: Record<string, ReturnType<typeof setTimeout>> = {};
 let globalWriteQueue: Promise<void> = Promise.resolve();
 
+function resolveEffectiveStatus(requested: CloudStatusType): CloudStatusType {
+  if (hasLoggedInUserContext && !currentUserLiveSyncAllowed) {
+    return 'paused-by-admin';
+  }
+  const liveConn = getLiveConnectionState();
+  if (liveConn.connected || isSupabaseConnected()) {
+    return 'connected';
+  }
+  return requested;
+}
+
 function updateCloudStatus(patch: Partial<CloudStatusInfo>) {
+  const liveConn = getLiveConnectionState();
+  const nextRawStatus = patch.status ?? cloudStatusState.status;
+  const effectiveStatus = resolveEffectiveStatus(nextRawStatus);
   cloudStatusState = {
     ...cloudStatusState,
     ...patch,
+    status: effectiveStatus,
     writeQuotaExceeded: isFirebaseWriteQuotaExceeded,
     readQuotaExceeded: isFirebaseReadQuotaExceeded,
+    liveServerConnected: liveConn.connected,
+    onlineUsersCount: liveConn.onlineUsers.length,
+    userLiveSyncEnabled: currentUserLiveSyncAllowed,
   };
   statusListeners.forEach((cb) => {
     try {
@@ -105,6 +137,31 @@ function updateCloudStatus(patch: Partial<CloudStatusInfo>) {
     } catch {
       // ignore listener error
     }
+  });
+}
+
+subscribeLiveConnectionState((liveConn) => {
+  updateCloudStatus({
+    status: liveConn.connected ? 'connected' : cloudStatusState.status,
+    liveServerConnected: liveConn.connected,
+    onlineUsersCount: liveConn.onlineUsers.length,
+    lastSyncAt: liveConn.lastEventAt || cloudStatusState.lastSyncAt,
+    lastError:
+      liveConn.connected && cloudStatusState.status === 'quota-exceeded'
+        ? undefined
+        : cloudStatusState.lastError,
+  });
+});
+
+export function setUserLiveSyncPermission(hasUser: boolean, allowed: boolean) {
+  hasLoggedInUserContext = hasUser;
+  currentUserLiveSyncAllowed = allowed;
+  updateCloudStatus({
+    status: !hasUser || allowed ? (getLiveConnectionState().connected ? 'connected' : cloudStatusState.status) : 'paused-by-admin',
+    lastError:
+      hasUser && !allowed
+        ? 'Sinkronisasi Live untuk akun ini sedang dinonaktifkan oleh Administrator.'
+        : undefined,
   });
 }
 
@@ -143,10 +200,12 @@ function classifyFirestoreError(
     } else {
       isFirebaseReadQuotaExceeded = true;
     }
+    const liveReady = getLiveConnectionState().connected || isSupabaseConnected();
     updateCloudStatus({
-      status: 'quota-exceeded',
-      lastError:
-        'Batas kuota harian gratis Cloud Firestore tercapai. Kuota akan reset besok, atau hubungkan Supabase di menu Database & Sync.',
+      status: liveReady ? 'connected' : 'quota-exceeded',
+      lastError: liveReady
+        ? undefined
+        : 'Batas kuota harian gratis Cloud Firestore tercapai. Kuota akan reset besok, atau hubungkan Supabase di menu Database & Sync.',
     });
     return 'quota-exceeded';
   }
@@ -159,24 +218,27 @@ function classifyFirestoreError(
       authInfo: { userId: null, email: null },
     };
     console.error('Firestore Error:', JSON.stringify(errInfo));
+    const liveReady = getLiveConnectionState().connected;
     updateCloudStatus({
-      status: 'permission-denied',
-      lastError: `Akses database Firestore ditolak (${path || 'root'}).`,
+      status: liveReady ? 'connected' : 'permission-denied',
+      lastError: liveReady ? undefined : `Akses database Firestore ditolak (${path || 'root'}).`,
     });
     return 'permission-denied';
   }
 
   if (code === 'unavailable' || errMsg.includes('the client is offline') || errMsg.includes('Failed to fetch')) {
+    const liveReady = getLiveConnectionState().connected;
     updateCloudStatus({
-      status: 'offline',
-      lastError: 'Koneksi internet / server Firestore sedang offline.',
+      status: liveReady ? 'connected' : 'offline',
+      lastError: liveReady ? undefined : 'Koneksi internet / server Firestore sedang offline.',
     });
     return 'offline';
   }
 
+  const liveReady = getLiveConnectionState().connected;
   updateCloudStatus({
-    status: 'error',
-    lastError: errMsg,
+    status: liveReady ? 'connected' : 'error',
+    lastError: liveReady ? undefined : errMsg,
   });
   return 'error';
 }
@@ -186,7 +248,7 @@ async function testFirestoreConnection() {
   try {
     await getDocFromServer(doc(db, 'test', 'connection'));
     updateCloudStatus({
-      status: isFirebaseWriteQuotaExceeded ? 'quota-exceeded' : 'connected',
+      status: isFirebaseWriteQuotaExceeded && !getLiveConnectionState().connected ? 'quota-exceeded' : 'connected',
       lastSyncAt: new Date().toISOString(),
     });
   } catch (error: any) {
@@ -285,7 +347,7 @@ export async function saveToCloud<T>(
   key: string,
   data: T,
   immediate = false,
-  meta?: { updatedBy?: string; lastAction?: string; actionDetail?: string }
+  meta?: { updatedBy?: string; updatedByUserId?: string; lastAction?: string; actionDetail?: string }
 ): Promise<void> {
   const executeSave = () => {
     const nextTask = globalWriteQueue
@@ -299,6 +361,29 @@ export async function saveToCloud<T>(
         if (meta?.updatedBy) metaFields.updatedBy = String(meta.updatedBy).slice(0, 200);
         if (meta?.lastAction) metaFields.lastAction = String(meta.lastAction).slice(0, 128);
         if (meta?.actionDetail) metaFields.actionDetail = String(meta.actionDetail).slice(0, 500);
+
+        // 0. Always push immediately to ERP Live Sync Server (real-time SSE across devices)
+        const liveRes = await pushLiveKey(key, data, {
+          updatedBy: meta?.updatedBy,
+          updatedByUserId: meta?.updatedByUserId,
+          lastAction: meta?.lastAction,
+          actionDetail: meta?.actionDetail,
+        });
+        if (liveRes.error === 'LIVE_SYNC_DISABLED_BY_ADMIN') {
+          currentUserLiveSyncAllowed = false;
+          updateCloudStatus({
+            status: 'paused-by-admin',
+            lastError: liveRes.message || 'Sinkronisasi Live untuk akun ini dinonaktifkan oleh Admin.',
+          });
+          return;
+        }
+        if (liveRes.ok) {
+          updateCloudStatus({
+            status: 'connected',
+            lastError: undefined,
+            lastSyncAt: updatedAt,
+          });
+        }
 
         // 1. Save to Firebase Firestore if write quota not exceeded
         if (!isFirebaseWriteQuotaExceeded) {
@@ -319,7 +404,7 @@ export async function saveToCloud<T>(
         if (isSupabaseConnected()) {
           try {
             const ok = await saveToSupabase(key, data);
-            if (ok && isFirebaseWriteQuotaExceeded) {
+            if (ok) {
               updateCloudStatus({
                 status: 'connected',
                 lastSyncAt: updatedAt,
@@ -356,10 +441,23 @@ export async function saveToCloud<T>(
   });
 }
 
-export async function loadFromCloudWithStatus<T>(key: string): Promise<CloudLoadResult<T>> {
+export async function loadFromCloudWithStatus<T>(key: string, userId?: string): Promise<CloudLoadResult<T>> {
   let firestoreError: string | undefined;
 
-  // 1. Try Firebase Firestore directly from server first
+  // 0. Try ERP Live Server first (always freshest across devices)
+  const liveRes = await fetchLiveKey<T>(key, userId);
+  if (liveRes.error === 'LIVE_SYNC_DISABLED_BY_ADMIN') {
+    return { data: null, existsInCloud: false, error: liveRes.error };
+  }
+  if (liveRes.exists && liveRes.record && liveRes.record.payload !== undefined) {
+    updateCloudStatus({
+      status: 'connected',
+      lastSyncAt: liveRes.record.updatedAt || new Date().toISOString(),
+    });
+    return { data: liveRes.record.payload, existsInCloud: true };
+  }
+
+  // 1. Try Firebase Firestore directly from server
   if (!isFirebaseReadQuotaExceeded) {
     try {
       const docRef = doc(db, 'erp_data', key);
@@ -369,14 +467,14 @@ export async function loadFromCloudWithStatus<T>(key: string): Promise<CloudLoad
         if (docData?.isChunked && typeof docData.chunkCount === 'number') {
           const reassembled = await readChunkedPayload<T>(key, docData.chunkCount, true);
           updateCloudStatus({
-            status: isFirebaseWriteQuotaExceeded ? 'quota-exceeded' : 'connected',
+            status: 'connected',
             lastSyncAt: new Date().toISOString(),
           });
           return { data: reassembled, existsInCloud: true };
         }
         if (docData && docData.payload !== undefined) {
           updateCloudStatus({
-            status: isFirebaseWriteQuotaExceeded ? 'quota-exceeded' : 'connected',
+            status: 'connected',
             lastSyncAt: new Date().toISOString(),
           });
           return { data: docData.payload as T, existsInCloud: true };
@@ -384,7 +482,7 @@ export async function loadFromCloudWithStatus<T>(key: string): Promise<CloudLoad
       }
       // Document genuinely does not exist on server
       updateCloudStatus({
-        status: isFirebaseWriteQuotaExceeded ? 'quota-exceeded' : 'connected',
+        status: getLiveConnectionState().connected ? 'connected' : isFirebaseWriteQuotaExceeded ? 'quota-exceeded' : 'connected',
       });
     } catch (serverErr: any) {
       // Fallback to cached getDoc if server unreachable
